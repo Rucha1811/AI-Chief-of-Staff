@@ -1,0 +1,154 @@
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from datetime import datetime
+from typing import Optional
+
+from app.core.database import get_db
+from app.models.email import Email
+from app.schemas.email import (
+    EmailResponse,
+    EmailCategoryUpdate,
+    EmailReplyResponse,
+    EmailSummaryResponse,
+)
+from app.services.ai_service import ai_service
+
+router = APIRouter(prefix="/api/emails", tags=["emails"])
+
+
+@router.get("")
+async def list_emails(
+    category: Optional[str] = None,
+    has_deadline: Optional[bool] = None,
+    is_starred: Optional[bool] = None,
+    limit: int = 50,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+) -> list[EmailResponse]:
+    query = db.query(Email)
+    if category:
+        query = query.filter(Email.category == category)
+    if has_deadline is not None:
+        query = query.filter(Email.has_deadline == has_deadline)
+    if is_starred is not None:
+        query = query.filter(Email.is_starred == is_starred)
+    return query.order_by(Email.received_at.desc()).offset(offset).limit(limit).all()
+
+
+@router.get("/stats")
+async def email_stats(db: Session = Depends(get_db)) -> dict:
+    total = db.query(Email).count()
+    unread = db.query(Email).filter(Email.is_read == False).count()
+    reply_required = db.query(Email).filter(Email.category == "reply_required").count()
+    important = db.query(Email).filter(Email.category == "important").count()
+    with_deadlines = db.query(Email).filter(Email.has_deadline == True).count()
+    return {
+        "total": total,
+        "unread": unread,
+        "reply_required": reply_required,
+        "important": important,
+        "with_deadlines": with_deadlines,
+        "can_ignore": db.query(Email).filter(Email.category == "can_ignore").count(),
+    }
+
+
+@router.get("/{email_id}")
+async def get_email(email_id: int, db: Session = Depends(get_db)) -> EmailResponse:
+    email = db.query(Email).filter(Email.id == email_id).first()
+    if not email:
+        raise HTTPException(status_code=404, detail="Email not found")
+    return email
+
+
+@router.patch("/{email_id}/category")
+async def update_email_category(
+    email_id: int, update: EmailCategoryUpdate, db: Session = Depends(get_db)
+) -> EmailResponse:
+    email = db.query(Email).filter(Email.id == email_id).first()
+    if not email:
+        raise HTTPException(status_code=404, detail="Email not found")
+    email.category = update.category
+    db.commit()
+    db.refresh(email)
+    return email
+
+
+@router.post("/{email_id}/classify")
+async def classify_email(email_id: int, db: Session = Depends(get_db)) -> EmailResponse:
+    email = db.query(Email).filter(Email.id == email_id).first()
+    if not email:
+        raise HTTPException(status_code=404, detail="Email not found")
+    result = await ai_service.classify_email(email.subject or "", email.body_text or "")
+    if "category" in result:
+        email.category = result["category"]
+    if result.get("has_deadline"):
+        email.has_deadline = True
+        email.deadline_description = result.get("deadline_description")
+        if result.get("deadline"):
+            try:
+                email.deadline_at = datetime.fromisoformat(result["deadline"])
+            except (ValueError, TypeError):
+                pass
+    email.summary = result.get("reason", "")
+    db.commit()
+    db.refresh(email)
+    return email
+
+
+@router.post("/{email_id}/suggest-reply")
+async def suggest_email_reply(
+    email_id: int, db: Session = Depends(get_db)
+) -> EmailReplyResponse:
+    email = db.query(Email).filter(Email.id == email_id).first()
+    if not email:
+        raise HTTPException(status_code=404, detail="Email not found")
+    reply = await ai_service.suggest_reply(
+        email.body_text or "", email.subject or ""
+    )
+    email.suggested_reply = reply
+    db.commit()
+    return EmailReplyResponse(email_id=email_id, suggested_reply=reply)
+
+
+@router.post("/{email_id}/summarize")
+async def summarize_email(
+    email_id: int, db: Session = Depends(get_db)
+) -> EmailSummaryResponse:
+    email = db.query(Email).filter(Email.id == email_id).first()
+    if not email:
+        raise HTTPException(status_code=404, detail="Email not found")
+    result = await ai_service.summarize_email(email.subject or "", email.body_text or "")
+    email.summary = result.get("summary", "")
+    if result.get("has_deadline"):
+        email.has_deadline = True
+        email.deadline_description = result.get("deadline_description")
+    db.commit()
+    return EmailSummaryResponse(
+        email_id=email_id,
+        summary=result.get("summary", ""),
+        has_deadline=result.get("has_deadline", False),
+        deadline_at=email.deadline_at,
+        deadline_description=email.deadline_description,
+    )
+
+
+@router.patch("/{email_id}/star")
+async def toggle_star(email_id: int, db: Session = Depends(get_db)) -> EmailResponse:
+    email = db.query(Email).filter(Email.id == email_id).first()
+    if not email:
+        raise HTTPException(status_code=404, detail="Email not found")
+    email.is_starred = not email.is_starred
+    db.commit()
+    db.refresh(email)
+    return email
+
+
+@router.patch("/{email_id}/read")
+async def mark_read(email_id: int, db: Session = Depends(get_db)) -> EmailResponse:
+    email = db.query(Email).filter(Email.id == email_id).first()
+    if not email:
+        raise HTTPException(status_code=404, detail="Email not found")
+    email.is_read = True
+    db.commit()
+    db.refresh(email)
+    return email
