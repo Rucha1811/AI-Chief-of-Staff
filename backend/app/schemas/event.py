@@ -16,6 +16,8 @@ class EventResponse(BaseModel):
     conflict_description: Optional[str] = None
     suggested_action: Optional[str] = None
     source: str
+    recurrence_rule: Optional[str] = None
+    recurrence_until: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
 
@@ -30,6 +32,8 @@ class EventCreate(BaseModel):
     start_time: datetime
     end_time: datetime
     is_all_day: bool = False
+    recurrence_rule: Optional[str] = None
+    recurrence_until: Optional[datetime] = None
 
 
 class EventUpdate(BaseModel):
@@ -39,11 +43,13 @@ class EventUpdate(BaseModel):
     start_time: Optional[datetime] = None
     end_time: Optional[datetime] = None
     is_all_day: Optional[bool] = None
+    recurrence_rule: Optional[str] = None
+    recurrence_until: Optional[datetime] = None
 
 
 class FreeSlot(BaseModel):
-    start: datetime
-    end: datetime
+    start: str
+    end: str
     duration_minutes: int
 
 

@@ -14,4 +14,7 @@ class DailyBriefing(Base, TimestampMixin):
     pending_tasks_count = Column(Integer, default=0)
     news_items = Column(JSON, nullable=True)
     suggested_plan = Column(Text, nullable=True)
+    meetings_highlights = Column(Text, nullable=True)
+    email_highlights = Column(Text, nullable=True)
+    task_highlights = Column(Text, nullable=True)
     full_briefing = Column(Text)

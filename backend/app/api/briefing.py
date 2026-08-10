@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from datetime import date, datetime
+from typing import Optional
 
 from app.core.database import get_db
 from app.models.briefing import DailyBriefing
@@ -8,30 +9,30 @@ from app.models.email import Email
 from app.models.event import Event
 from app.models.task import Task
 from app.schemas.briefing import BriefingResponse
-from app.services.ai_service import ai_service
+from app.services.ai_service import ai_service, _time_greeting
+from app.utils import clean_news_summary
 
 router = APIRouter(prefix="/api/briefing", tags=["briefing"])
 
 
-@router.get("/today")
-async def get_today_briefing(db: Session = Depends(get_db)) -> dict:
-    today = date.today()
-    existing = db.query(DailyBriefing).filter(
-        DailyBriefing.date >= datetime.combine(today, datetime.min.time()),
-        DailyBriefing.date <= datetime.combine(today, datetime.max.time()),
-    ).first()
+def _serialize(briefing: DailyBriefing) -> dict:
+    return {
+        "greeting": _time_greeting(),
+        "summary": briefing.summary,
+        "meetings_count": briefing.meetings_count,
+        "important_emails_count": briefing.important_emails_count,
+        "pending_tasks_count": briefing.pending_tasks_count,
+        "news_items": briefing.news_items or [],
+        "suggested_plan": briefing.suggested_plan,
+        "meetings_highlights": briefing.meetings_highlights,
+        "email_highlights": briefing.email_highlights,
+        "task_highlights": briefing.task_highlights,
+        "full_briefing": briefing.full_briefing,
+    }
 
-    if existing:
-        return {
-            "greeting": "Good Morning!",
-            "summary": existing.summary,
-            "meetings_count": existing.meetings_count,
-            "important_emails_count": existing.important_emails_count,
-            "pending_tasks_count": existing.pending_tasks_count,
-            "news_items": existing.news_items or [],
-            "suggested_plan": existing.suggested_plan,
-            "full_briefing": existing.full_briefing,
-        }
+
+async def generate_today_briefing(db: Session) -> dict:
+    today = date.today()
 
     day_start = datetime.combine(today, datetime.min.time())
     day_end = datetime.combine(today, datetime.max.time())
@@ -59,22 +60,20 @@ async def get_today_briefing(db: Session = Depends(get_db)) -> dict:
         for e in important_emails
     ]
     tasks_data = [
-        {"title": t.title, "priority": t.priority.value, "due": t.due_date.strftime("%Y-%m-%d") if t.due_date else None}
+        {"title": t.title, "priority": t.priority, "due": t.due_date.strftime("%Y-%m-%d") if t.due_date else None}
         for t in pending_tasks
     ]
 
     async def get_news():
+        from app.services.news_service import fetch_news
         try:
-            import httpx
-            resp = await httpx.AsyncClient().get(
-                "https://newsapi.org/v2/top-headlines",
-                params={"category": "technology", "country": "us", "pageSize": 3},
-                timeout=10,
-            )
-            articles = resp.json().get("articles", [])
+            items = await fetch_news("technology", limit=3)
             return [
-                {"title": a.get("title", ""), "summary": a.get("description", "")}
-                for a in articles[:3]
+                {
+                    "title": i["title"],
+                    "summary": clean_news_summary(i.get("summary") or ""),
+                }
+                for i in items
             ]
         except Exception:
             return []
@@ -91,13 +90,16 @@ async def get_today_briefing(db: Session = Depends(get_db)) -> dict:
         pending_tasks_count=len(pending_tasks),
         news_items=news_items,
         suggested_plan=result.get("suggested_plan", ""),
+        meetings_highlights=result.get("meetings_highlights", ""),
+        email_highlights=result.get("email_highlights", ""),
+        task_highlights=result.get("task_highlights", ""),
         full_briefing=result.get("full_briefing", result.get("summary", "")),
     )
     db.add(briefing)
     db.commit()
 
     return {
-        "greeting": result.get("greeting", "Good Morning!"),
+        "greeting": result.get("greeting", _time_greeting()),
         "summary": result.get("summary", ""),
         "meetings_count": len(meetings),
         "important_emails_count": len(important_emails),
@@ -109,3 +111,23 @@ async def get_today_briefing(db: Session = Depends(get_db)) -> dict:
         "task_highlights": result.get("task_highlights", ""),
         "full_briefing": briefing.full_briefing,
     }
+
+
+@router.get("/today")
+async def get_today_briefing(
+    refresh: bool = False, db: Session = Depends(get_db)
+) -> dict:
+    today = date.today()
+    existing = db.query(DailyBriefing).filter(
+        DailyBriefing.date >= datetime.combine(today, datetime.min.time()),
+        DailyBriefing.date <= datetime.combine(today, datetime.max.time()),
+    ).first()
+
+    if existing and not refresh:
+        return _serialize(existing)
+
+    if existing:
+        db.delete(existing)
+        db.commit()
+
+    return await generate_today_briefing(db)

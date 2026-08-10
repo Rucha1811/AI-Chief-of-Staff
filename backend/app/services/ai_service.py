@@ -1,10 +1,81 @@
 import httpx
 import json
 import logging
+import re
+from datetime import datetime
 from typing import Optional
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+def _time_greeting() -> str:
+    hour = datetime.now().hour
+    if hour < 5:
+        return "Working late!"
+    if hour < 12:
+        return "Good morning!"
+    if hour < 17:
+        return "Good afternoon!"
+    if hour < 21:
+        return "Good evening!"
+    return "Good night!"
+
+
+def _parse_json(text: str):
+    if not text:
+        raise json.JSONDecodeError("empty response", text, 0)
+    cleaned = text.strip().removeprefix("```json").removesuffix("```").strip()
+    cleaned = re.sub(r"\bTrue\b", "true", cleaned)
+    cleaned = re.sub(r"\bFalse\b", "false", cleaned)
+    cleaned = re.sub(r"\bNone\b", "null", cleaned)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        start = None
+        for i, ch in enumerate(cleaned):
+            if ch in "[{":
+                start = i
+                break
+        if start is not None:
+            open_ch, close_ch = ("[", "]") if cleaned[start] == "[" else ("{", "}")
+            depth = 0
+            in_str = False
+            esc = False
+            for i in range(start, len(cleaned)):
+                ch = cleaned[i]
+                if in_str:
+                    if esc:
+                        esc = False
+                    elif ch == "\\":
+                        esc = True
+                    elif ch == '"':
+                        in_str = False
+                    continue
+                if ch == '"':
+                    in_str = True
+                elif ch == open_ch:
+                    depth += 1
+                elif ch == close_ch:
+                    depth -= 1
+                    if depth == 0:
+                        try:
+                            return json.loads(cleaned[start : i + 1])
+                        except json.JSONDecodeError:
+                            break
+        raise
+
+
+def _to_minutes(value: str) -> int:
+    try:
+        hour, minute = str(value).split(":")
+        return int(hour) * 60 + int(minute)
+    except (ValueError, AttributeError):
+        return 0
+
+
+def _minutes_between(start: str, end: str) -> int:
+    return max(0, _to_minutes(end) - _to_minutes(start))
 
 
 class AIService:
@@ -13,11 +84,14 @@ class AIService:
         self.model = settings.OLLAMA_MODEL
         self.client = httpx.AsyncClient(timeout=120.0)
 
-    async def _call_ollama(self, prompt: str, system: Optional[str] = None) -> str:
+    async def _call_ollama(
+        self, prompt: str, system: Optional[str] = None, max_tokens: int = 300
+    ) -> str:
         payload = {
             "model": self.model,
             "prompt": prompt,
             "stream": False,
+            "options": {"num_predict": max_tokens},
         }
         if system:
             payload["system"] = system
@@ -37,6 +111,36 @@ class AIService:
             logger.error(f"Failed to parse Ollama response: {e}")
             raise
 
+    async def analyze_email(self, subject: str, body: str) -> dict:
+        system = """You are an email analysis assistant for a chief-of-staff AI. Analyze the email and respond ONLY in JSON with this exact shape:
+{"category": "reply_required|important|can_ignore|promotion|social", "summary": "one concise sentence capturing the key point", "has_deadline": true/false, "deadline": null or "YYYY-MM-DD", "deadline_description": null or short text, "suggested_reply": null or a short professional reply draft}
+
+Rules:
+- reply_required: person wants an answer/action from me
+- important: matters to me but no immediate response needed
+- promotion: marketing, discounts, promotional offers
+- social: social media, LinkedIn notifications
+- can_ignore: everything else
+- Only set has_deadline/deadline when the email contains a concrete date or deadline. Never invent one."""
+        prompt = f"""Email Subject: {subject}
+
+Email Body:
+{body[:2500]}
+
+Analyze the email."""
+        result = await self._call_ollama(prompt, system, max_tokens=350)
+        try:
+            return _parse_json(result)
+        except (json.JSONDecodeError, AttributeError):
+            return {
+                "category": "unknown",
+                "summary": result[:300],
+                "has_deadline": False,
+                "deadline": None,
+                "deadline_description": None,
+                "suggested_reply": None,
+            }
+
     async def classify_email(self, subject: str, body: str) -> dict:
         system = """You are an email classification assistant. Classify the email into one of:
 - reply_required: needs a response
@@ -52,10 +156,9 @@ Respond in JSON format: {"category": "...", "reason": "...", "has_deadline": boo
 Email Body: {body[:2000]}
 
 Classify this email and determine if it contains any deadlines."""
-        result = await self._call_ollama(prompt, system)
+        result = await self._call_ollama(prompt, system, max_tokens=180)
         try:
-            cleaned = result.strip().removeprefix("```json").removesuffix("```").strip()
-            return json.loads(cleaned)
+            return _parse_json(result)
         except (json.JSONDecodeError, AttributeError):
             return {"category": "unknown", "reason": result[:200], "has_deadline": False, "deadline_description": None}
 
@@ -67,7 +170,7 @@ Original Email Body: {email_body[:2000]}
 Context: {context or "No additional context"}
 
 Draft a professional reply:"""
-        return await self._call_ollama(prompt, system)
+        return await self._call_ollama(prompt, system, max_tokens=320)
 
     async def summarize_email(self, subject: str, body: str) -> dict:
         system = "You summarize emails concisely. Extract key info including deadlines and action items."
@@ -77,10 +180,9 @@ Subject: {subject}
 Body: {body[:3000]}
 
 Respond in JSON: {{"summary": "...", "has_deadline": bool, "deadline": null or "YYYY-MM-DD", "deadline_description": null or str, "action_items": [...]}}"""
-        result = await self._call_ollama(prompt, system)
+        result = await self._call_ollama(prompt, system, max_tokens=300)
         try:
-            cleaned = result.strip().removeprefix("```json").removesuffix("```").strip()
-            return json.loads(cleaned)
+            return _parse_json(result)
         except (json.JSONDecodeError, AttributeError):
             return {"summary": result[:300], "has_deadline": False, "deadline": None, "deadline_description": None, "action_items": []}
 
@@ -92,10 +194,9 @@ Respond in JSON: {{"summary": "...", "has_deadline": bool, "deadline": null or "
 
 For each conflict, describe it and suggest a resolution.
 Respond in JSON: [{{"event1": "...", "event2": "...", "description": "...", "suggestion": "..."}}]"""
-        result = await self._call_ollama(prompt, system)
+        result = await self._call_ollama(prompt, system, max_tokens=350)
         try:
-            cleaned = result.strip().removeprefix("```json").removesuffix("```").strip()
-            return json.loads(cleaned)
+            return _parse_json(result)
         except (json.JSONDecodeError, AttributeError):
             return []
 
@@ -108,12 +209,33 @@ Existing Events:
 
 Suggest available free slots of at least 1 hour each.
 Respond in JSON: [{{"start": "HH:MM", "end": "HH:MM", "duration_minutes": int}}]"""
-        result = await self._call_ollama(prompt, system)
+        result = await self._call_ollama(prompt, system, max_tokens=200)
         try:
-            cleaned = result.strip().removeprefix("```json").removesuffix("```").strip()
-            return json.loads(cleaned)
+            data = _parse_json(result)
         except (json.JSONDecodeError, AttributeError):
             return []
+
+        if isinstance(data, dict):
+            data = data.get("free_slots") or data.get("slots") or data.get("items") or []
+        if not isinstance(data, list):
+            return []
+
+        slots = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            start = str(item.get("start", "")).strip()
+            end = str(item.get("end", "")).strip()
+            if not start or not end:
+                continue
+            try:
+                duration = int(item.get("duration_minutes") or _minutes_between(start, end))
+            except (TypeError, ValueError):
+                duration = _minutes_between(start, end)
+            if duration <= 0:
+                continue
+            slots.append({"start": start, "end": end, "duration_minutes": duration})
+        return slots
 
     async def summarize_document(self, text: str) -> dict:
         system = "You summarize documents and extract key points, deadlines, and action items."
@@ -122,10 +244,9 @@ Respond in JSON: [{{"start": "HH:MM", "end": "HH:MM", "duration_minutes": int}}]
 {text[:4000]}
 
 Respond in JSON: {{"summary": "...", "key_points": ["...", "..."], "deadlines": null or [{{"description": "...", "date": null or "YYYY-MM-DD"}}], "action_items": ["..."]}}"""
-        result = await self._call_ollama(prompt, system)
+        result = await self._call_ollama(prompt, system, max_tokens=450)
         try:
-            cleaned = result.strip().removeprefix("```json").removesuffix("```").strip()
-            return json.loads(cleaned)
+            return _parse_json(result)
         except (json.JSONDecodeError, AttributeError):
             return {"summary": result[:500], "key_points": [], "deadlines": None, "action_items": []}
 
@@ -137,7 +258,7 @@ Respond in JSON: {{"summary": "...", "key_points": ["...", "..."], "deadlines": 
 Question: {question}
 
 Answer based only on the document content:"""
-        return await self._call_ollama(prompt, system)
+        return await self._call_ollama(prompt, system, max_tokens=350)
 
     async def prioritize_tasks(self, tasks_text: str) -> list[dict]:
         system = "You prioritize tasks based on urgency, importance, and deadlines."
@@ -146,10 +267,9 @@ Answer based only on the document content:"""
 {tasks_text}
 
 Respond in JSON: [{{"task_id": int, "priority": "critical|high|medium|low", "reason": "..."}}]"""
-        result = await self._call_ollama(prompt, system)
+        result = await self._call_ollama(prompt, system, max_tokens=280)
         try:
-            cleaned = result.strip().removeprefix("```json").removesuffix("```").strip()
-            return json.loads(cleaned)
+            return _parse_json(result)
         except (json.JSONDecodeError, AttributeError):
             return []
 
@@ -187,13 +307,12 @@ Respond in JSON:
 "email_highlights": "...",
 "task_highlights": "...",
 "suggested_plan": "9-11 AM: ...\\n11-12 PM: ...\\n..."}}"""
-        result = await self._call_ollama(prompt, system)
+        result = await self._call_ollama(prompt, system, max_tokens=520)
         try:
-            cleaned = result.strip().removeprefix("```json").removesuffix("```").strip()
-            return json.loads(cleaned)
+            return _parse_json(result)
         except (json.JSONDecodeError, AttributeError):
             return {
-                "greeting": "Good Morning!",
+                "greeting": _time_greeting(),
                 "summary": result[:500],
                 "meetings_highlights": "",
                 "email_highlights": "",

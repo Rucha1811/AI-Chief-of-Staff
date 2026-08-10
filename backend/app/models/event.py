@@ -18,3 +18,5 @@ class Event(Base, TimestampMixin):
     conflict_description = Column(Text, nullable=True)
     suggested_action = Column(Text, nullable=True)
     source = Column(String(64), default="manual")
+    recurrence_rule = Column(String(32), nullable=True)
+    recurrence_until = Column(DateTime, nullable=True)

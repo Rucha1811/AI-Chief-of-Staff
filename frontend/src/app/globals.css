@@ -4,48 +4,75 @@
 
 @layer base {
   :root {
-    --bg-primary: #0f172a;
-    --bg-secondary: #1e293b;
-    --bg-card: #1e293b;
-    --text-primary: #f1f5f9;
-    --text-secondary: #94a3b8;
-    --text-muted: #64748b;
-    --border: #334155;
-    --accent: #6366f1;
-    --accent-hover: #4f46e5;
-    --success: #22c55e;
-    --warning: #eab308;
-    --danger: #ef4444;
+    --bg-primary: #fafafa;
+    --bg-secondary: #ffffff;
+    --bg-card: #ffffff;
+    --text-primary: #0f172a;
+    --text-secondary: #475569;
+    --text-muted: #94a3b8;
+    --border: #e2e8f0;
+    --accent: #d62976;
+    --accent-hover: #962fbf;
+    --success: #16a34a;
+    --warning: #d97706;
+    --danger: #dc2626;
+    --instagram-1: #feda75;
+    --instagram-2: #fa7e1e;
+    --instagram-3: #d62976;
+    --instagram-4: #962fbf;
+    --instagram-5: #4f5bd5;
   }
 
   * {
-    @apply border-gray-800;
+    @apply border-slate-200;
   }
 
   body {
-    @apply bg-slate-950 text-slate-100 antialiased;
+    @apply text-slate-800 antialiased;
+    background-color: var(--bg-primary);
+    background-image:
+      radial-gradient(1100px 550px at 85% -10%, rgba(214, 41, 118, 0.08), transparent 55%),
+      radial-gradient(900px 450px at -10% 20%, rgba(150, 47, 191, 0.07), transparent 55%),
+      radial-gradient(900px 500px at 50% 115%, rgba(79, 91, 213, 0.07), transparent 60%);
+    background-attachment: fixed;
   }
 }
 
 @layer components {
   .card {
-    @apply bg-slate-800/50 border border-slate-700/50 rounded-xl p-6 backdrop-blur-sm;
+    @apply bg-white border border-slate-200 rounded-xl p-6 shadow-sm;
+    box-shadow: 0 1px 3px rgba(15, 23, 42, 0.06), inset 0 1px 0 rgba(255, 255, 255, 0.8);
+  }
+
+  .card-hover {
+    @apply transition-all duration-200;
+  }
+
+  .card-hover:hover {
+    @apply border-pink-300;
+    box-shadow: 0 8px 32px -12px rgba(214, 41, 118, 0.2), 0 1px 3px rgba(15, 23, 42, 0.06);
   }
 
   .btn {
-    @apply px-4 py-2 rounded-lg font-medium transition-colors duration-150 text-sm;
+    @apply px-4 py-2 rounded-xl font-medium transition-all duration-150 text-sm;
   }
 
   .btn-primary {
-    @apply btn bg-indigo-600 text-white hover:bg-indigo-500;
+    @apply btn text-white;
+    background-image: linear-gradient(135deg, var(--instagram-2), var(--instagram-3) 45%, var(--instagram-4));
+    box-shadow: 0 4px 16px -6px rgba(214, 41, 118, 0.45);
+  }
+
+  .btn-primary:hover {
+    filter: brightness(1.06);
   }
 
   .btn-secondary {
-    @apply btn bg-slate-700 text-slate-200 hover:bg-slate-600;
+    @apply btn bg-white text-slate-700 border border-slate-300 hover:bg-slate-50;
   }
 
   .btn-ghost {
-    @apply btn text-slate-300 hover:bg-slate-800;
+    @apply btn text-slate-600 hover:bg-slate-100;
   }
 
   .badge {
@@ -53,23 +80,35 @@
   }
 
   .badge-critical {
-    @apply badge bg-red-500/20 text-red-400;
+    @apply badge bg-red-100 text-red-700;
   }
 
   .badge-high {
-    @apply badge bg-orange-500/20 text-orange-400;
+    @apply badge bg-orange-100 text-orange-700;
   }
 
   .badge-medium {
-    @apply badge bg-yellow-500/20 text-yellow-400;
+    @apply badge bg-yellow-100 text-yellow-700;
   }
 
   .badge-low {
-    @apply badge bg-slate-500/20 text-slate-400;
+    @apply badge bg-slate-100 text-slate-500;
+  }
+
+  .badge-promotion {
+    @apply badge bg-cyan-100 text-cyan-700;
+  }
+
+  .badge-social {
+    @apply badge bg-sky-100 text-sky-700;
   }
 
   .input {
-    @apply w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-2.5 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent;
+    @apply w-full bg-white border border-slate-300 rounded-lg px-4 py-2.5 text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none focus:border-transparent;
+  }
+
+  .input:focus {
+    box-shadow: 0 0 0 2px rgba(214, 41, 118, 0.4);
   }
 
   .stat-card {
@@ -81,14 +120,39 @@
   }
 
   .stat-label {
-    @apply text-sm text-slate-400;
+    @apply text-sm text-slate-500;
   }
 }
 
 @layer utilities {
+  .text-gradient {
+    background-image: linear-gradient(135deg, var(--instagram-1), var(--instagram-2) 25%, var(--instagram-3) 55%, var(--instagram-4) 80%, var(--instagram-5));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+
+  .bg-instagram {
+    background-image: linear-gradient(135deg, var(--instagram-2), var(--instagram-3) 45%, var(--instagram-4) 80%, var(--instagram-5));
+  }
+
+  .gradient-top-border {
+    position: relative;
+  }
+
+  .gradient-top-border::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--instagram-3), var(--instagram-4), transparent);
+  }
+
   .scrollbar-thin {
     scrollbar-width: thin;
-    scrollbar-color: #334155 transparent;
+    scrollbar-color: #cbd5e1 transparent;
   }
 
   .scrollbar-thin::-webkit-scrollbar {
@@ -100,7 +164,7 @@
   }
 
   .scrollbar-thin::-webkit-scrollbar-thumb {
-    background-color: #334155;
+    background-color: #cbd5e1;
     border-radius: 3px;
   }
 }
