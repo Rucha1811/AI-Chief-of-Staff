@@ -1,9 +1,19 @@
 from pathlib import Path
 from typing import Optional
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings
 
-_ENV_FILE = Path(__file__).resolve().parent.parent.parent / ".env"
+_BACKEND_DIR = Path(__file__).resolve().parent.parent.parent
+_ENV_FILE = _BACKEND_DIR / ".env"
+
+
+def _resolve_database_url(value: str) -> str:
+    if value.startswith("sqlite:///./"):
+        rel = value[len("sqlite:///./"):]
+        db_path = (_BACKEND_DIR.parent / rel).resolve()
+        return f"sqlite:///{db_path}"
+    return value
 
 
 class Settings(BaseSettings):
@@ -21,6 +31,11 @@ class Settings(BaseSettings):
 
     class Config:
         env_file = _ENV_FILE
+
+    @field_validator("DATABASE_URL")
+    @classmethod
+    def _absolute_database_path(cls, value: str) -> str:
+        return _resolve_database_url(value)
 
 
 settings = Settings()
