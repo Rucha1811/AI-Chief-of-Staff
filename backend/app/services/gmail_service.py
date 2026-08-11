@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import datetime
 import html as html_lib
 import http.client
 import json
@@ -36,6 +37,9 @@ from app.services.auth_state import AuthStateStore
 RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 MAX_RETRIES = 4
 BATCH_SIZE = 50
+
+DEFAULT_EMAIL_RETENTION_DAYS = 90
+DEFAULT_EMAIL_SENSITIVITY = "PERSONAL"
 
 
 class GmailAuthError(RuntimeError):
@@ -259,6 +263,10 @@ async def sync_emails(max_results: int = 50, db: Session = None) -> list[int]:
         for data in fetched:
             if not data["message_id"] or data["message_id"] in existing_ids:
                 continue
+            data["retention_until"] = data.get("retention_until") or (
+                datetime.datetime.utcnow() + datetime.timedelta(days=DEFAULT_EMAIL_RETENTION_DAYS)
+            )
+            data["sensitivity"] = data.get("sensitivity") or DEFAULT_EMAIL_SENSITIVITY
             email = Email(**data)
             db.add(email)
             db.flush()

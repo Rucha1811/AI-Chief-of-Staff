@@ -52,6 +52,10 @@ _MIGRATIONS = {
         ("recurrence_rule", "VARCHAR(32)"),
         ("recurrence_until", "DATETIME"),
     ],
+    "emails": [
+        ("retention_until", "DATETIME"),
+        ("sensitivity", "VARCHAR(16)"),
+    ],
 }
 
 

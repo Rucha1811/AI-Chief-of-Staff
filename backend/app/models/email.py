@@ -25,3 +25,5 @@ class Email(Base, TimestampMixin):
     suggested_reply = Column(Text, nullable=True)
     summary = Column(Text, nullable=True)
     created_task_id = Column(Integer, nullable=True)
+    retention_until = Column(DateTime, nullable=True)
+    sensitivity = Column(String(16), nullable=True)
