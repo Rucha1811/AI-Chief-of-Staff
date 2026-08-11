@@ -136,16 +136,6 @@ def _get_body_text(payload):
     return None
 
 
-def _get_body_html(payload):
-    if payload.get("mimeType") == "text/html" and payload.get("body", {}).get("data"):
-        return _decode(payload["body"]["data"])
-    for part in payload.get("parts", []):
-        html = _get_body_html(part)
-        if html:
-            return html
-    return None
-
-
 def _decode(data):
     if not data:
         return None
@@ -224,7 +214,6 @@ def _parse_message(full: dict) -> dict:
         "to_email": _header(headers, "To"),
         "subject": _header(headers, "Subject"),
         "body_text": _get_body_text(payload),
-        "body_html": _get_body_html(payload),
         "received_at": received_at,
         "is_read": "UNREAD" not in full.get("labelIds", []),
     }
