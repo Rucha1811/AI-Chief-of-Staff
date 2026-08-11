@@ -22,6 +22,17 @@ logger = logging.getLogger(__name__)
 CLASSROOM_COURSES_SCOPE = "https://www.googleapis.com/auth/classroom.courses.readonly"
 CLASSROOM_COURSEWORK_SCOPE = "https://www.googleapis.com/auth/classroom.coursework.me.readonly"
 
+# Sem 5, A.Y. 2026-27 — only these courses are tracked so old-semester
+# assignments are never re-created by background sync.
+CURRENT_SEMESTER_COURSE_IDS = {
+    "868177393277",  # ITUE302 — Ethical Hacking Essentials
+    "868244246599",  # CEUC302 - Theory of Computation
+    "868824718454",  # ITUE301 - ADVANCED WEB DEVELOPMENT FRAMEWORKS
+    "855217650975",  # CSUA301 - Introduction to Research Methodology
+    "855168777201",  # CEUC301 - Fundamentals of Operating System Design
+    "798179285666",  # CSUC301 - Machine Learning
+}
+
 
 class ClassroomAuthError(RuntimeError):
     pass
@@ -134,6 +145,8 @@ async def list_assignments(limit_per_course: int = 20) -> list[dict]:
 
     assignments = []
     for course in courses:
+        if course["id"] not in CURRENT_SEMESTER_COURSE_IDS:
+            continue
         try:
             result = await _call_with_retry(
                 lambda: service.courses().courseWork().list(
@@ -281,12 +294,18 @@ async def sync_assignments(db: Session = None) -> dict:
     tasks_submitted_skipped = 0
     events_created = 0
     events_skipped = 0
+    assignments_created = 0
+    assignments_updated = 0
     try:
         existing_task_ids = {
             t.source_id for t in db.query(Task).filter(Task.source == "classroom").all()
         }
         existing_event_ids = {
             e.calendar_event_id for e in db.query(Event).filter(Event.source == "classroom").all()
+        }
+        existing_assignment_ids = {
+            a.source_id
+            for a in db.query(Assignment).filter(Assignment.source == "classroom").all()
         }
 
         for a in assignments:
@@ -331,6 +350,36 @@ async def sync_assignments(db: Session = None) -> dict:
             else:
                 events_skipped += 1
 
+            if a["id"] not in existing_assignment_ids:
+                db.add(
+                    Assignment(
+                        title=a["title"],
+                        course=a.get("course_name"),
+                        due_date=due,
+                        status="submitted" if submitted else "todo",
+                        points_max=a.get("max_points"),
+                        priority="high",
+                        source="classroom",
+                        source_id=a["id"],
+                        external_url=f"https://classroom.google.com/w/c/{a['course_id']}/t/{a['id']}",
+                    )
+                )
+                assignments_created += 1
+            else:
+                assignment = (
+                    db.query(Assignment)
+                    .filter(
+                        Assignment.source == "classroom",
+                        Assignment.source_id == a["id"],
+                    )
+                    .first()
+                )
+                if assignment:
+                    assignment.due_date = due
+                    assignment.status = "submitted" if submitted else assignment.status
+                    assignment.points_max = a.get("max_points")
+                    assignments_updated += 1
+
         db.commit()
     finally:
         if owns_db:
@@ -343,4 +392,6 @@ async def sync_assignments(db: Session = None) -> dict:
         "tasks_submitted_skipped": tasks_submitted_skipped,
         "events_created": events_created,
         "events_skipped": events_skipped,
+        "assignments_created": assignments_created,
+        "assignments_updated": assignments_updated,
     }

@@ -82,7 +82,6 @@ class AIService:
     def __init__(self):
         self.base_url = settings.OLLAMA_BASE_URL
         self.model = settings.OLLAMA_MODEL
-        self.client = httpx.AsyncClient(timeout=120.0)
 
     async def _call_ollama(
         self, prompt: str, system: Optional[str] = None, max_tokens: int = 300
@@ -96,20 +95,23 @@ class AIService:
         if system:
             payload["system"] = system
 
-        try:
-            resp = await self.client.post(
-                f"{self.base_url}/api/generate",
-                json=payload,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            return data.get("response", "")
-        except httpx.RequestError as e:
-            logger.error(f"Ollama request failed: {e}")
-            raise
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse Ollama response: {e}")
-            raise
+        # One client per call so the same transport is never shared between
+        # different event loops (uvicorn loop vs. background sync threads).
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            try:
+                resp = await client.post(
+                    f"{self.base_url}/api/generate",
+                    json=payload,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                return data.get("response", "")
+            except httpx.RequestError as e:
+                logger.error(f"Ollama request failed: {e}")
+                raise
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse Ollama response: {e}")
+                raise
 
     async def analyze_email(self, subject: str, body: str) -> dict:
         system = """You are an email analysis assistant for a chief-of-staff AI. Analyze the email and respond ONLY in JSON with this exact shape:
@@ -140,6 +142,28 @@ Analyze the email."""
                 "deadline_description": None,
                 "suggested_reply": None,
             }
+
+    async def extract_schedule(self, subject: str, body: str) -> dict:
+        system = """You extract scheduling details from an email. Only include items that are explicitly about a meeting, review, exam, deadline, or assignment with a concrete date/time stated in the email. Respond ONLY in JSON:
+{"items": [{"kind": "meeting|review|exam|assignment|event", "title": "...", "date": "YYYY-MM-DD or null", "time": "HH:MM 24-hour or null", "end_time": "HH:MM 24-hour or null", "location": null or "...", "link": null or "...", "notes": null or "..."}]}
+Rules:
+- kind: "meeting" for meetings/webinars/sessions, "review" for project/semester reviews, "exam" for exams/CIE/evaluations/tests, "assignment" for submissions with due dates, "event" for other dated activities.
+- Only extract an item if the email contains a concrete date (e.g. "15th August 2026"). Never invent dates. Use year from context (assume 2026 if ambiguous).
+- Extract the time EXACTLY as stated and convert to 24-hour "HH:MM". Examples: "12:00 PM" -> "12:00", "08:00 AM" -> "08:00", "12:00 AM" -> "00:00", "4:30 PM" -> "16:30", "23:59 IST" -> "23:59", "from 10:00 AM onwards" -> "10:00". If no time is stated, set time null.
+- Extract location (venue/room/building) and link (URL) when present.
+- If nothing scheduleable, return {"items": []}.
+Only output the JSON object."""
+        prompt = f"""Email Subject: {subject}
+
+Email Body:
+{body[:3000]}
+
+Extract the schedule items from this email."""
+        result = await self._call_ollama(prompt, system, max_tokens=400)
+        try:
+            return _parse_json(result)
+        except (json.JSONDecodeError, AttributeError):
+            return {"items": []}
 
     async def classify_email(self, subject: str, body: str) -> dict:
         system = """You are an email classification assistant. Classify the email into one of:

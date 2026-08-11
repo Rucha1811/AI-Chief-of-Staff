@@ -13,38 +13,13 @@ from app.schemas.email import (
 )
 from app.services.ai_service import ai_service
 from app.services import gmail_service
+from app.services.email_processor import process_email as process_email_task
 
 router = APIRouter(prefix="/api/emails", tags=["emails"])
 
 
 async def analyze_email_in_db(email_id: int) -> None:
-    session = SessionLocal()
-    email = session.query(Email).filter(Email.id == email_id).first()
-    if not email:
-        session.close()
-        return
-    try:
-        result = await ai_service.analyze_email(
-            email.subject or "", email.body_text or ""
-        )
-        email.category = result.get("category", "unknown")
-        email.summary = result.get("summary", "")
-        if result.get("has_deadline"):
-            email.has_deadline = True
-            email.deadline_description = result.get("deadline_description")
-            if result.get("deadline"):
-                try:
-                    email.deadline_at = datetime.fromisoformat(result["deadline"])
-                except (ValueError, TypeError):
-                    pass
-        reply = result.get("suggested_reply")
-        if reply:
-            email.suggested_reply = reply
-        session.commit()
-    except Exception:
-        session.rollback()
-    finally:
-        session.close()
+    await process_email_task(email_id)
 
 
 @router.post("/sync")
@@ -116,31 +91,34 @@ async def process_all_emails(
     )
     processed = 0
     failed = 0
+    scheduled = 0
     for email in emails:
         try:
-            result = await ai_service.analyze_email(
-                email.subject or "", email.body_text or ""
-            )
-            email.category = result.get("category", "unknown")
-            email.summary = result.get("summary", "")
-            if result.get("has_deadline"):
-                email.has_deadline = True
-                email.deadline_description = result.get("deadline_description")
-                if result.get("deadline"):
-                    try:
-                        email.deadline_at = datetime.fromisoformat(
-                            result["deadline"]
-                        )
-                    except (ValueError, TypeError):
-                        pass
-            reply = result.get("suggested_reply")
-            if reply:
-                email.suggested_reply = reply
+            result = await process_email_task(email.id)
             processed += 1
+            scheduled += sum(
+                1
+                for it in result.get("scheduled_items", [])
+                if it.get("action") == "created"
+            )
         except Exception:
             failed += 1
-    db.commit()
-    return {"processed": processed, "failed": failed, "remaining": db.query(Email).filter(Email.category == "unknown").count()}
+    return {
+        "processed": processed,
+        "failed": failed,
+        "scheduled": scheduled,
+        "remaining": db.query(Email).filter(Email.category == "unknown").count(),
+    }
+
+
+@router.post("/{email_id}/process")
+async def process_single_email(email_id: int) -> dict:
+    from app.services.email_processor import process_email
+
+    result = await process_email(email_id)
+    if result.get("error") == "not found":
+        raise HTTPException(status_code=404, detail="Email not found")
+    return result
 
 
 @router.get("/stats")

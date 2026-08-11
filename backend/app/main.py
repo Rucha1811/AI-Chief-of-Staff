@@ -160,8 +160,12 @@ def _startup_background():
 
     def _push_loop():
         from app.services.push_service import push_pending_notifications
+        from app.services.reminder_service import generate_reminders
 
+        import logging
         import time
+
+        logger = logging.getLogger("ai-chief.sync")
 
         last_email_sync = 0.0
         last_classroom_sync = 0.0
@@ -170,7 +174,7 @@ def _startup_background():
                 generate_reminders()
                 push_pending_notifications()
             except Exception:
-                pass
+                logger.exception("reminders/push failed")
 
             now = time.time()
             if now - last_email_sync >= 600:
@@ -179,14 +183,47 @@ def _startup_background():
                     import asyncio
                     from app.core.database import get_db
                     from app.services.gmail_service import sync_emails
+                    from app.services.email_processor import process_email
 
                     session = next(get_db())
                     try:
-                        asyncio.run(sync_emails(max_results=10, db=session))
+                        added_ids = asyncio.run(sync_emails(max_results=25, db=session))
+                        for email_id in added_ids:
+                            try:
+                                asyncio.run(process_email(email_id))
+                            except Exception:
+                                logger.exception("failed to process new email %s", email_id)
+                    finally:
+                        session.close()
+                    logger.info("email sync: %s new emails", len(added_ids))
+                except Exception:
+                    logger.exception("email sync failed")
+
+                try:
+                    import asyncio
+                    from app.core.database import get_db
+                    from app.models.email import Email
+
+                    session = next(get_db())
+                    try:
+                        unknown = (
+                            session.query(Email)
+                            .filter(Email.category == "unknown")
+                            .order_by(Email.received_at.desc())
+                            .limit(10)
+                            .all()
+                        )
+                        from app.services.email_processor import process_email
+
+                        for email in unknown:
+                            try:
+                                asyncio.run(process_email(email.id))
+                            except Exception:
+                                logger.exception("failed to backfill email %s", email.id)
                     finally:
                         session.close()
                 except Exception:
-                    pass
+                    logger.exception("email backfill failed")
 
             if now - last_classroom_sync >= 1800:
                 last_classroom_sync = now
@@ -204,8 +241,9 @@ def _startup_background():
                         asyncio.run(sync_assignments(db=session))
                     finally:
                         session.close()
+                    logger.info("classroom sync done")
                 except Exception:
-                    pass
+                    logger.exception("classroom sync failed")
 
             time.sleep(60)
 
