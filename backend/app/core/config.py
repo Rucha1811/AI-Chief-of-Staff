@@ -1,3 +1,5 @@
+import os
+import secrets
 from pathlib import Path
 from typing import Optional
 
@@ -6,6 +8,33 @@ from pydantic_settings import BaseSettings
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent.parent
 _ENV_FILE = _BACKEND_DIR / ".env"
+_SECRET_KEY_FILE = _BACKEND_DIR / ".secret_key"
+_FALLBACK_SECRET_KEY = "change-this-to-a-random-secret-key"
+
+
+def _is_placeholder(value: Optional[str]) -> bool:
+    return not value or value == _FALLBACK_SECRET_KEY or value.startswith("change-this-to-")
+
+
+def _resolve_secret_key(value: Optional[str]) -> str:
+    """Use the configured key, else load or generate a persistent random one.
+
+    The fallback default is never used in production: if no key is configured
+    we generate a strong key once and store it in a gitignored file so tokens
+    and encrypted OAuth credentials survive restarts."""
+    if not _is_placeholder(value):
+        return value
+    if _SECRET_KEY_FILE.exists():
+        stored = _SECRET_KEY_FILE.read_text().strip()
+        if stored:
+            return stored
+    key = secrets.token_urlsafe(48)
+    try:
+        _SECRET_KEY_FILE.write_text(key)
+        os.chmod(_SECRET_KEY_FILE, 0o600)
+    except OSError:
+        pass
+    return key
 
 
 def _resolve_database_url(value: str) -> str:
@@ -36,6 +65,11 @@ class Settings(BaseSettings):
     @classmethod
     def _absolute_database_path(cls, value: str) -> str:
         return _resolve_database_url(value)
+
+    @field_validator("SECRET_KEY")
+    @classmethod
+    def _strong_secret_key(cls, value: Optional[str]) -> str:
+        return _resolve_secret_key(value)
 
 
 settings = Settings()
