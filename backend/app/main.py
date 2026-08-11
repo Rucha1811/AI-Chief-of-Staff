@@ -25,15 +25,17 @@ from app.api import (
 )
 
 _PUBLIC_PATHS = {"/api/auth/login", "/api/auth/status", "/api/health"}
+_DOC_PATHS = {"/docs", "/redoc", "/openapi.json"}
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
+        is_doc = path in _DOC_PATHS
         if (
             request.method == "OPTIONS"
             or path in _PUBLIC_PATHS
-            or not path.startswith("/api/")
+            or (not path.startswith("/api/") and not is_doc)
         ):
             return await call_next(request)
         if not auth.is_authenticated(request):
@@ -85,7 +87,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.CORS_ORIGINS,
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
