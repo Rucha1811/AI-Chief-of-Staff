@@ -57,6 +57,12 @@ class Settings(BaseSettings):
     MS_TENANT_ID: str = "consumers"
     AUTH_PASSWORD: Optional[str] = None
     AUTH_TOKEN_TTL_DAYS: int = 7
+    CORS_ORIGINS: list[str] = [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3001",
+    ]
 
     class Config:
         env_file = _ENV_FILE
