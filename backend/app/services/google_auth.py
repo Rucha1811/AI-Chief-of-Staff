@@ -15,11 +15,27 @@ from app.services.auth_state import AuthStateStore
 _HTTP_TIMEOUT = 15
 _refresh_lock = threading.Lock()
 
+SCOPE_CALENDAR = "https://www.googleapis.com/auth/calendar"
+SCOPE_CALENDAR_EVENTS = "https://www.googleapis.com/auth/calendar.events"
+SCOPE_CALENDAR_READONLY = "https://www.googleapis.com/auth/calendar.readonly"
+
+# Superset → covered scopes. A token granted a superset scope satisfies
+# requests for the narrower scopes (e.g. old "calendar" tokens keep working
+# after we switched to requesting only "calendar.events").
+_SCOPE_SUPERSETS = {
+    SCOPE_CALENDAR: {SCOPE_CALENDAR_EVENTS, SCOPE_CALENDAR_READONLY},
+}
+
+# Minimal scopes for the enabled features (least privilege):
+#  - Gmail: read only (summarize, detect deadlines, schedule)
+#  - Classroom: read only
+#  - Calendar: read + create events only (no settings/delete)
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/classroom.courses.readonly",
     "https://www.googleapis.com/auth/classroom.coursework.me.readonly",
-    "https://www.googleapis.com/auth/calendar",
+    "https://www.googleapis.com/auth/classroom.student-submissions.me.readonly",
+    SCOPE_CALENDAR_EVENTS,
 ]
 
 CREDENTIALS_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "credentials")
@@ -54,8 +70,10 @@ def save_credentials(creds: Credentials) -> None:
 
 
 def has_scope(creds: Credentials, scope: str) -> bool:
-    scopes = list(getattr(creds, "scopes", None) or [])
-    return scope in scopes
+    scopes = set(getattr(creds, "scopes", None) or [])
+    if scope in scopes:
+        return True
+    return any(scope in _SCOPE_SUPERSETS.get(s, ()) for s in scopes)
 
 
 def build_service(service_name: str, version: str, creds: Credentials):

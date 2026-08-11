@@ -4,6 +4,7 @@ import logging
 from sqlalchemy.orm import Session
 
 from app.services.google_auth import (
+    SCOPE_CALENDAR_EVENTS,
     GoogleAuthError,
     build_service,
     ensure_refreshed,
@@ -14,7 +15,9 @@ from app.services.auth_state import AuthStateStore
 
 logger = logging.getLogger(__name__)
 
-CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar"
+# Minimal privilege: read + create events only. Old tokens granted the full
+# "calendar" scope still satisfy this via has_scope's superset handling.
+CALENDAR_SCOPE = SCOPE_CALENDAR_EVENTS
 
 EVENT_COLOR_BY_SOURCE = {
     "classroom": "5",
