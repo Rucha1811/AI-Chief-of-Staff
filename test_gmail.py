@@ -24,12 +24,27 @@ TOKEN_FILE = os.path.join(
 )
 
 
-def get_gmail_service():
-    creds = None
+def _load():
+    from app.core.config import settings
+    from app.core.security import decrypt_bytes
 
-    if os.path.exists(TOKEN_FILE):
-        with open(TOKEN_FILE, "rb") as f:
-            creds = pickle.load(f)
+    if not os.path.exists(TOKEN_FILE):
+        return None
+    with open(TOKEN_FILE, "rb") as f:
+        return pickle.loads(decrypt_bytes(f.read(), settings.SECRET_KEY))
+
+
+def _save(creds):
+    from app.core.config import settings
+    from app.core.security import encrypt_bytes
+
+    os.makedirs(os.path.dirname(TOKEN_FILE), exist_ok=True)
+    with open(TOKEN_FILE, "wb") as f:
+        f.write(encrypt_bytes(pickle.dumps(creds), settings.SECRET_KEY))
+
+
+def get_gmail_service():
+    creds = _load()
 
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
@@ -42,8 +57,7 @@ def get_gmail_service():
             flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_FILE, SCOPES)
             creds = flow.run_local_server(port=0)
 
-        with open(TOKEN_FILE, "wb") as f:
-            pickle.dump(creds, f)
+        _save(creds)
 
     return build("gmail", "v1", credentials=creds)
 
