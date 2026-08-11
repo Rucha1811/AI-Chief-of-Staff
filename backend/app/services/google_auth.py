@@ -53,10 +53,7 @@ def load_credentials() -> Optional[Credentials]:
     try:
         with open(TOKEN_FILE, "rb") as f:
             raw = f.read()
-        try:
-            creds = pickle.loads(raw)
-        except Exception:
-            creds = pickle.loads(decrypt_bytes(raw, settings.SECRET_KEY))
+        creds = pickle.loads(decrypt_bytes(raw, settings.SECRET_KEY))
         save_credentials(creds)
         return creds
     except Exception:
