@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import select
 
 from app.core.database import SessionLocal
+from app.core.config import settings
 from app.models.notification import Notification
 from app.models.push_subscription import PushSubscription
 
@@ -94,7 +95,7 @@ def _send(sub: PushSubscription, title: str, body: str, entity_type, entity_id):
                 {"title": title, "body": body, "entity_type": entity_type, "entity_id": entity_id}
             ),
             vapid_private_key=os.path.join(_KEY_DIR, "private.pem"),
-            vapid_claims={"sub": "mailto:aichief@localhost"},
+            vapid_claims={"sub": f"mailto:{settings.VAPID_CLAIMS_EMAIL}"},
         )
         return True
     except WebPushException as e:

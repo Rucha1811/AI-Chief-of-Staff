@@ -5,6 +5,7 @@ from datetime import date, datetime, time
 from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal
+from app.core.config import settings
 from app.models.assignment import Assignment
 from app.models.event import Event
 from app.models.task import Task
@@ -22,16 +23,10 @@ logger = logging.getLogger(__name__)
 CLASSROOM_COURSES_SCOPE = "https://www.googleapis.com/auth/classroom.courses.readonly"
 CLASSROOM_COURSEWORK_SCOPE = "https://www.googleapis.com/auth/classroom.coursework.me.readonly"
 
-# Sem 5, A.Y. 2026-27 — only these courses are tracked so old-semester
-# assignments are never re-created by background sync.
-CURRENT_SEMESTER_COURSE_IDS = {
-    "868177393277",  # ITUE302 — Ethical Hacking Essentials
-    "868244246599",  # CEUC302 - Theory of Computation
-    "868824718454",  # ITUE301 - ADVANCED WEB DEVELOPMENT FRAMEWORKS
-    "855217650975",  # CSUA301 - Introduction to Research Methodology
-    "855168777201",  # CEUC301 - Fundamentals of Operating System Design
-    "798179285666",  # CSUC301 - Machine Learning
-}
+# Tracked courses are org-scoped, deployment-specific data. They must be set
+# via CLASSROOM_COURSE_IDS in .env; no course IDs belong in code. When empty,
+# all courses from the connected Classroom account are tracked.
+CURRENT_SEMESTER_COURSE_IDS = set(settings.classroom_course_ids)
 
 
 class ClassroomAuthError(RuntimeError):

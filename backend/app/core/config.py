@@ -1,7 +1,7 @@
 import os
 import secrets
 from pathlib import Path
-from typing import Optional
+from typing import Annotated, Optional
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings
@@ -63,6 +63,23 @@ class Settings(BaseSettings):
         "http://localhost:3001",
         "http://127.0.0.1:3001",
     ]
+
+    # Scheduling / retention defaults (business-configurable, env overridable)
+    DEFAULT_SCHEDULE_TIME: str = "09:00"
+    DEFAULT_SCHEDULE_DURATION_MINUTES: int = 60
+    DEFAULT_EXAM_DURATION_MINUTES: int = 180
+    DEFAULT_WORK_HOURS: str = "9:00-18:00"
+    EMAIL_RETENTION_DAYS: int = 90
+    EMAIL_SENSITIVITY: str = "PERSONAL"
+    EMERGENCY_CODE_TTL_HOURS: int = 24
+    VAPID_CLAIMS_EMAIL: str = "aichief@localhost"
+
+    # Org-scoped data. Comma-separated in .env (gitignored); empty = auto-discover.
+    CLASSROOM_COURSE_IDS: str = ""
+
+    @property
+    def classroom_course_ids(self) -> list[str]:
+        return [v.strip() for v in self.CLASSROOM_COURSE_IDS.split(",") if v.strip()]
 
     class Config:
         env_file = _ENV_FILE

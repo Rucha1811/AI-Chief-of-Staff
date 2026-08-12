@@ -2,6 +2,7 @@ import logging
 from datetime import datetime, timedelta
 
 from app.core.database import SessionLocal
+from app.core.config import settings
 from app.models.assignment import Assignment
 from app.models.email import Email
 from app.models.event import Event
@@ -88,9 +89,9 @@ def _apply_schedule_item(db, email, item) -> dict:
         return {"kind": kind, "action": "skipped", "reason": "no date"}
     time_hm = _parse_hm(item.get("time")) or _parse_hm(item.get("end_time"))
     if time_hm is None:
-        time_hm = datetime.strptime("09:00", "%H:%M").time()
+        time_hm = datetime.strptime(settings.DEFAULT_SCHEDULE_TIME, "%H:%M").time()
     start = datetime.combine(date, time_hm)
-    end = start + timedelta(hours=1)
+    end = start + timedelta(minutes=settings.DEFAULT_SCHEDULE_DURATION_MINUTES)
     end_time = _parse_hm(item.get("end_time"))
     if end_time is not None:
         end = datetime.combine(date, end_time)
@@ -112,7 +113,7 @@ def _apply_schedule_item(db, email, item) -> dict:
                 title=title,
                 subject=item.get("course") or email.subject or None,
                 exam_date=start,
-                duration_minutes=180,
+                duration_minutes=settings.DEFAULT_EXAM_DURATION_MINUTES,
                 location=location,
                 notes=note_text,
                 status="upcoming",

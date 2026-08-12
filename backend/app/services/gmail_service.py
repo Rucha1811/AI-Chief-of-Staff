@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 
 from app.models.email import Email
 from app.core.database import SessionLocal
+from app.core.config import settings
 from app.services.google_auth import (
     SCOPES,
     CREDENTIALS_DIR,
@@ -37,9 +38,6 @@ from app.services.auth_state import AuthStateStore
 RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 MAX_RETRIES = 4
 BATCH_SIZE = 50
-
-DEFAULT_EMAIL_RETENTION_DAYS = 90
-DEFAULT_EMAIL_SENSITIVITY = "PERSONAL"
 
 
 class GmailAuthError(RuntimeError):
@@ -253,9 +251,9 @@ async def sync_emails(max_results: int = 50, db: Session = None) -> list[int]:
             if not data["message_id"] or data["message_id"] in existing_ids:
                 continue
             data["retention_until"] = data.get("retention_until") or (
-                datetime.datetime.utcnow() + datetime.timedelta(days=DEFAULT_EMAIL_RETENTION_DAYS)
+                datetime.datetime.utcnow() + datetime.timedelta(days=settings.EMAIL_RETENTION_DAYS)
             )
-            data["sensitivity"] = data.get("sensitivity") or DEFAULT_EMAIL_SENSITIVITY
+            data["sensitivity"] = data.get("sensitivity") or settings.EMAIL_SENSITIVITY
             email = Email(**data)
             db.add(email)
             db.flush()

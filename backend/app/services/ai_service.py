@@ -224,7 +224,10 @@ Respond in JSON: [{{"event1": "...", "event2": "...", "description": "...", "sug
         except (json.JSONDecodeError, AttributeError):
             return []
 
-    async def suggest_free_slots(self, events_text: str, date: str, work_hours: str = "9:00-18:00") -> list[dict]:
+    async def suggest_free_slots(
+        self, events_text: str, date: str, work_hours: str | None = None
+    ) -> list[dict]:
+        work_hours = work_hours or settings.DEFAULT_WORK_HOURS
         system = "You suggest free time slots in a calendar for scheduling work sessions."
         prompt = f"""Date: {date}
 Work Hours: {work_hours}

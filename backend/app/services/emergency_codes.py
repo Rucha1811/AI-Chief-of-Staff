@@ -1,15 +1,16 @@
 import secrets
 from datetime import datetime, timedelta
+from typing import Optional
 
 from app.core.database import SessionLocal
+from app.core.config import settings
 from app.core.security import hash_password, verify_password
 from app.models.emergency_code import EmergencyCode
 
-DEFAULT_TTL_HOURS = 24
 
-
-def generate_emergency_code(ttl_hours: int = DEFAULT_TTL_HOURS, db=None) -> str:
+def generate_emergency_code(ttl_hours: Optional[int] = None, db=None) -> str:
     """Create a single-use emergency login code and return the plaintext."""
+    ttl_hours = ttl_hours if ttl_hours is not None else settings.EMERGENCY_CODE_TTL_HOURS
     owns = db is None
     db = db or SessionLocal()
     code = secrets.token_urlsafe(16)
