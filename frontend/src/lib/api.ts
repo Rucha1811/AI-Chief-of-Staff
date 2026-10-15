@@ -1,13 +1,8 @@
-function getBaseUrl(): string {
-  const configured = process.env.NEXT_PUBLIC_API_URL;
-  if (configured) return configured;
-  if (typeof window === "undefined") return "http://localhost:8000";
-  const host = window.location.hostname;
-  if (host === "localhost" || host === "127.0.0.1") return "http://localhost:8000";
-  return `http://${host}:8000`;
-}
+import { getApiBaseUrl } from "./config";
 
-const BASE_URL = getBaseUrl();
+// Backend origin resolution lives in lib/config.ts (the single configuration
+// module). Nothing in this file may name a backend host.
+const BASE_URL = getApiBaseUrl();
 const TOKEN_KEY = "aichief_token";
 
 export function getToken(): string | null {
@@ -36,8 +31,17 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
         ...options,
       });
       if (res.status === 401) {
-        setToken(null);
-        throw new Error("Session expired. Please sign in again.");
+        let body = "";
+        try {
+          body = await res.text();
+        } catch {
+          /* ignore */
+        }
+        if (body.includes("Authentication required")) {
+          setToken(null);
+          throw new Error("Session expired. Please sign in again.");
+        }
+        throw new Error(`API Error 401: ${body}`);
       }
       if (!res.ok) {
         const err = await res.text();
@@ -55,7 +59,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   }
   if (isNetworkError(lastError)) {
     throw new Error(
-      "Can't reach the AI Chief server (localhost:8000). Make sure the backend is running, then refresh."
+      `Can't reach the AI Chief server at ${BASE_URL}. Make sure the backend is running, then refresh.`
     );
   }
   throw lastError;
@@ -211,6 +215,15 @@ export interface Document {
   updated_at: string;
 }
 
+export interface Contact {
+  id: number;
+  display_name: string;
+  emails: string[];
+  phone_numbers: string[];
+  created_at: string;
+  updated_at: string;
+}
+
 export interface Briefing {
   greeting: string;
   summary: string;
@@ -294,22 +307,145 @@ export interface AttendanceStats {
   percentage: number;
 }
 
+/** One subject-level row read from the CHARUSAT e-Governance portal. */
+export interface EGovAttendanceRecord {
+  id: number;
+  term: string;
+  subject_code: string;
+  subject_name: string;
+  classes_held: number | null;
+  classes_attended: number | null;
+  percentage: number | null;
+  source_updated_at: string | null;
+  synced_at: string | null;
+}
+
+export type EGovState =
+  | "not_eligible"
+  | "not_connected"
+  | "connected"
+  | "stale"
+  | "reauth_required"
+  | "unavailable";
+
+/** Connection state + last known-good snapshot for the e-Governance connector. */
+export interface EGovStatus {
+  connected: boolean;
+  state: EGovState;
+  method: "session" | "import" | null;
+  account: string | null;
+  status: string | null;
+  last_synced_at: string | null;
+  stale: boolean;
+  last_error: string | null;
+  record_count: number;
+  overall_percentage: number | null;
+  holdings: { held: number; attended: number };
+  records: EGovAttendanceRecord[];
+  imported?: number;
+  skipped?: number;
+}
+
+export interface DbPoolHealth {
+  size: number;
+  overflow: number;
+  checked_out: number | null;
+  overflow_used: number | null;
+}
+
+export interface DatabaseHealth {
+  status: string;
+  pool: DbPoolHealth;
+  detail?: string;
+}
+
+export interface IntegrationsHealth {
+  n8n_ingest_enabled: boolean;
+  ingest_batch_max: number;
+}
+
+/**
+ * The PUBLIC `/api/health` probe (Phase D7) is deliberately minimal: an
+ * uptime/proxy check needs only the status. Everything operational - DB pool,
+ * integrations, feature state - comes from the authenticated
+ * `/api/system/info` endpoint instead.
+ */
+export interface PublicHealth {
+  status: string;
+}
+
+export interface SystemHealth {
+  status: string;
+  app: string;
+  version: string;
+  database: DatabaseHealth;
+  integrations: IntegrationsHealth;
+}
+
+export interface OllamaHealth {
+  model: string;
+  available: boolean;
+  model_available: boolean;
+  circuit_breaker: string;
+  status: string;
+}
+
+export interface AIQueueStats {
+  queue_size: number;
+  active: number;
+  processed: number;
+  failed: number;
+  uptime_seconds: number;
+}
+
+export interface SystemInfo {
+  system: SystemHealth;
+  ai: {
+    ollama: OllamaHealth;
+    ai_queue: AIQueueStats;
+    circuit_breaker: string;
+  };
+}
+
 // Dashboard
 export const api = {
   auth: {
-    login: (password: string, emergencyCode?: string) =>
+    login: (password: string) =>
       request<{ token: string; expires_in: number }>("/api/auth/login", {
         method: "POST",
-        body: JSON.stringify({
-          password,
-          ...(emergencyCode ? { emergency_code: emergencyCode } : {}),
-        }),
+        body: JSON.stringify({ password }),
+      }),
+    // Emergency-code login is account-scoped: the backend requires the
+    // account email AND the code (no email -> no emergency login).
+    emergencyLogin: (email: string, code: string) =>
+      request<{ token: string; expires_in: number }>("/api/auth/login", {
+        method: "POST",
+        body: JSON.stringify({ email, emergency_code: code }),
+      }),
+    // Google sign-in handoff: the callback redirects with a single-use,
+    // short-lived exchange code; trade it for the session token here.
+    exchange: (code: string) =>
+      request<{ token: string; expires_in: number }>("/api/auth/exchange", {
+        method: "POST",
+        body: JSON.stringify({ code }),
       }),
     status: () => request<{ enabled: boolean; authenticated: boolean }>("/api/auth/status"),
+    // Revokes every outstanding token for the user on the server, then the
+    // caller clears the locally stored token (setToken(null)).
+    logout: () => request<{ ok: boolean }>("/api/auth/logout", { method: "POST" }),
+    me: () =>
+      request<{ id: number; email: string; display_name: string | null; timezone: string; status: string; roles: string[]; permissions: string[] }>(
+        "/api/auth/me"
+      ),
   },
 
   dashboard: {
     get: () => request<Dashboard>("/api/dashboard"),
+  },
+
+  monitoring: {
+    health: () => request<PublicHealth>("/api/health"),
+    systemInfo: () => request<SystemInfo>("/api/system/info"),
   },
 
   // Emails
@@ -333,10 +469,9 @@ export const api = {
     toggleStar: (id: number) => request<Email>(`/api/emails/${id}/star`, { method: "PATCH" }),
     markRead: (id: number) => request<Email>(`/api/emails/${id}/read`, { method: "PATCH" }),
     sync: (limit = 50) => request<{ added: number }>(`/api/emails/sync?limit=${limit}`, { method: "POST" }),
-    processAll: (limit = 50) =>
+    processAll: (limit = 1000) =>
       request<{ processed: number; failed: number; remaining: number }>(`/api/emails/process-all?limit=${limit}`, { method: "POST" }),
     health: () => request<GoogleAuthHealth>("/api/emails/health"),
-    reauth: () => request<{ connected: boolean }>("/api/emails/re-auth", { method: "POST" }),
   },
 
   // Events
@@ -368,6 +503,16 @@ export const api = {
         `/api/events/schedule-study?${params}`, { method: "POST" }
       );
     },
+    planExams: (daysPerExam = 3, minutesPerDay = 120, overwrite = false) => {
+      const params = new URLSearchParams({
+        days_per_exam: String(daysPerExam),
+        minutes_per_day: String(minutesPerDay),
+        overwrite: String(overwrite),
+      });
+      return request<{ exams: number; tasks_created: number; events_created: number; date_from?: string; date_to?: string; message?: string }>(
+        `/api/events/plan-exams?${params}`, { method: "POST" }
+      );
+    },
     syncToGoogle: (dateFrom: string, dateTo?: string) => {
       const params = new URLSearchParams({ date_from: dateFrom });
       if (dateTo) params.set("date_to", dateTo);
@@ -397,6 +542,7 @@ export const api = {
   // Documents
   documents: {
     list: () => request<Document[]>("/api/documents"),
+    syncGoogle: () => request<{ synced: number }>("/api/documents/sync-google", { method: "POST" }),
     upload: async (file: File) => {
       const form = new FormData();
       form.append("file", file);
@@ -409,6 +555,7 @@ export const api = {
       if (!res.ok) throw new Error(`Upload failed: ${await res.text()}`);
       return res.json() as Promise<Document>;
     },
+
     get: (id: number) => request<Document>(`/api/documents/${id}`),
     delete: (id: number) => request<{ ok: boolean }>(`/api/documents/${id}`, { method: "DELETE" }),
     summarize: (id: number) => request<Document>(`/api/documents/${id}/summarize`, { method: "POST" }),
@@ -417,6 +564,11 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ document_id: documentId, question }),
       }),
+  },
+
+  contacts: {
+    list: () => request<Contact[]>("/api/contacts"),
+    sync: () => request<{ synced: number }>("/api/contacts/sync", { method: "POST" }),
   },
 
   // Briefing
@@ -462,6 +614,23 @@ export const api = {
     sync: () => request<{ fetched: number; created: number; skipped: number }>("/api/teams/sync", { method: "POST" }),
   },
 
+  // Google integration (per-user connect / disconnect)
+  integrations: {
+    googleAuthorize: () =>
+      request<{ url: string; state: string; redirect_uri: string }>("/api/integrations/google/authorize"),
+    googleDisconnect: () =>
+      request<{ connected: boolean; revoked: boolean }>("/api/integrations/google/disconnect", {
+        method: "POST",
+      }),
+    googleHealth: () => request<GoogleAuthHealth>("/api/emails/health"),
+    user: {
+      list: () =>
+        request<Array<{ provider: string; account_id: string | null; status: string; last_synced_at: string | null; last_error: string | null }>>(
+          "/api/integrations/user"
+        ),
+    },
+  },
+
   // Exams
   exams: {
     list: (status?: string) => request<Exam[]>(`/api/exams${status ? `?status=${status}` : ""}`),
@@ -490,6 +659,18 @@ export const api = {
       request<AttendanceRecord>("/api/attendance", { method: "POST", body: JSON.stringify(data) }),
     delete: (id: number) => request<{ ok: boolean }>(`/api/attendance/${id}`, { method: "DELETE" }),
     stats: () => request<AttendanceStats>("/api/attendance/stats"),
+  },
+
+  // CHARUSAT e-Governance attendance (read-only, separate from the manual
+  // records above and from the Google integration).
+  egov: {
+    get: () => request<EGovStatus>("/api/attendance/egov"),
+    connectSession: (data: { session_cookie: string; attendance_url: string; account_id?: string }) =>
+      request<EGovStatus>("/api/attendance/egov/session", { method: "POST", body: JSON.stringify(data) }),
+    importHtml: (data: { html: string; term?: string }) =>
+      request<EGovStatus>("/api/attendance/egov/import", { method: "POST", body: JSON.stringify(data) }),
+    refresh: () => request<EGovStatus>("/api/attendance/egov/refresh", { method: "POST" }),
+    disconnect: () => request<{ ok: boolean; disconnected: boolean }>("/api/attendance/egov", { method: "DELETE" }),
   },
 
   // News

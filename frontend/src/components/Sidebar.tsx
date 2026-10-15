@@ -11,14 +11,19 @@ import {
   CalendarClock,
   CheckSquare,
   FileText,
+  Users,
   Newspaper,
   Sparkles,
   GraduationCap,
   ClipboardList,
   UserCheck,
+  Activity,
+  Settings,
   Menu,
   X,
+  LogOut,
 } from "lucide-react";
+import { api, setToken, getToken } from "@/lib/api";
 
 const navItems = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
@@ -29,18 +34,38 @@ const navItems = [
   { href: "/timetable", label: "Timetable", icon: CalendarClock },
   { href: "/tasks", label: "Tasks", icon: CheckSquare },
   { href: "/documents", label: "Documents", icon: FileText },
+  { href: "/contacts", label: "Contacts", icon: Users },
   { href: "/exams", label: "Exams", icon: GraduationCap },
   { href: "/assignments", label: "Assignments", icon: ClipboardList },
   { href: "/attendance", label: "Attendance", icon: UserCheck },
+  { href: "/monitoring", label: "Monitoring", icon: Activity },
+  { href: "/settings", label: "Settings", icon: Settings },
 ];
 
 export default function Sidebar() {
   const pathname = usePathname();
   const [open, setOpen] = useState(false);
+  const [userEmail, setUserEmail] = useState<string | null>(null);
+  const [userDisplay, setUserDisplay] = useState<string | null>(null);
 
   useEffect(() => {
     setOpen(false);
   }, [pathname]);
+
+  useEffect(() => {
+    if (!getToken()) return;
+    api.auth.me().then((u) => {
+      setUserEmail(u.email);
+      setUserDisplay(u.display_name || u.email.split("@")[0]);
+    }).catch(() => {});
+  }, []);
+
+  const handleLogout = async () => {
+    try { await api.auth.logout(); } catch { /* still clear locally */ }
+    setToken(null);
+    setUserEmail(null);
+    setUserDisplay(null);
+  };
 
   const renderNav = (compact: boolean) => (
     <nav className="flex-1 px-2 md:px-3 py-4 space-y-1 overflow-y-auto scrollbar-thin">
@@ -67,6 +92,28 @@ export default function Sidebar() {
     </nav>
   );
 
+  const renderFooter = (compact: boolean) => (
+    <div className={clsx("border-t border-slate-200", compact ? "px-0 lg:px-3 py-3" : "px-3 py-3")}>
+      {userEmail && (
+        <div className={clsx("mb-2", compact ? "hidden lg:block" : "block")}>
+          <p className="text-xs font-semibold text-slate-700 truncate">{userDisplay}</p>
+          <p className="text-xs text-slate-400 truncate">{userEmail}</p>
+        </div>
+      )}
+      <button
+        onClick={handleLogout}
+        title="Sign out"
+        className={clsx(
+          "flex items-center gap-3 w-full rounded-xl text-sm font-medium transition-all duration-150 text-slate-500 hover:text-red-600 hover:bg-red-50",
+          compact ? "justify-center px-0 py-3 lg:justify-start lg:px-3 lg:py-2" : "px-3 py-2"
+        )}
+      >
+        <LogOut size={18} className={compact ? "hidden lg:block" : ""} />
+        <span className={compact ? "text-xs" : undefined}>Sign out</span>
+      </button>
+    </div>
+  );
+
   return (
     <>
       {/* Mobile top bar */}
@@ -84,6 +131,13 @@ export default function Sidebar() {
           </div>
           <span className="text-sm font-bold text-slate-900">AI Chief</span>
         </div>
+        <button
+          onClick={handleLogout}
+          className="ml-auto flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-sm font-medium text-slate-600 hover:text-red-600 hover:bg-red-50 transition-colors"
+        >
+          <LogOut className="w-4 h-4" />
+          <span>Sign out</span>
+        </button>
       </header>
 
       {/* Mobile drawer backdrop */}
@@ -116,12 +170,10 @@ export default function Sidebar() {
           </button>
         </div>
         {renderNav(false)}
-        <div className="px-4 py-4 border-t border-slate-200">
-          <p className="text-xs text-slate-400 font-medium">v1.0.0 &middot; AI Chief of Staff</p>
-        </div>
+        {renderFooter(false)}
       </aside>
 
-      {/* Desktop sidebar: icon-only on md, full labels on lg+ */}
+      {/* Desktop sidebar */}
       <aside className="hidden md:flex fixed left-0 top-0 h-screen w-[76px] lg:w-64 bg-white/85 border-r border-slate-200 backdrop-blur-xl flex-col z-30 before:absolute before:inset-x-0 before:top-0 before:h-px before:bg-gradient-to-r before:from-transparent before:via-pink-600/70 before:to-transparent">
         <div className="flex items-center gap-3 px-0 lg:px-6 py-5 justify-center lg:justify-start border-b border-slate-200">
           <div className="w-10 h-10 rounded-xl bg-instagram flex items-center justify-center shadow-lg shadow-pink-600/30 shrink-0">
@@ -133,9 +185,7 @@ export default function Sidebar() {
           </div>
         </div>
         {renderNav(true)}
-        <div className="px-0 lg:px-4 py-4 border-t border-slate-200 text-center lg:text-left">
-          <p className="text-xs text-slate-400 font-medium hidden lg:block">v1.0.0 &middot; AI Chief of Staff</p>
-        </div>
+        {renderFooter(true)}
       </aside>
     </>
   );

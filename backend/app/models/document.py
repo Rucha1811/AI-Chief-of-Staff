@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, Boolean, DateTime
+from sqlalchemy import BigInteger, Column, ForeignKey, Integer, String, Text, Boolean, DateTime
 from app.core.database import Base
 from app.models.base import TimestampMixin
 
@@ -16,3 +16,6 @@ class Document(Base, TimestampMixin):
     deadlines = Column(Text, nullable=True)
     raw_text = Column(Text, nullable=True)
     is_indexed = Column(Boolean, default=False)
+    user_id = Column(
+        BigInteger, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )

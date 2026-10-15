@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime
+from sqlalchemy import BigInteger, Column, ForeignKey, Integer, String, Text, DateTime
 from app.core.database import Base
 from app.models.base import TimestampMixin
 
@@ -17,3 +17,6 @@ class Assignment(Base, TimestampMixin):
     source = Column(String(32), default="user")
     source_id = Column(String(256), nullable=True)
     external_url = Column(String(512), nullable=True)
+    user_id = Column(
+        BigInteger, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )

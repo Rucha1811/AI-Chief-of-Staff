@@ -2,7 +2,8 @@
 
 import { useEffect, useRef, useState } from "react";
 import { api, Email, EmailStats, GoogleAuthHealth } from "@/lib/api";
-import { Mail, Star, AlertCircle, MessageSquare, Sparkles, RefreshCw, Download, ChevronDown, ChevronUp, Plug } from "lucide-react";
+import { Mail, Star, AlertCircle, MessageSquare, Sparkles, RefreshCw, Download, ChevronDown, ChevronUp, Settings } from "lucide-react";
+import Link from "next/link";
 import BackButton from "@/components/BackButton";
 
 export default function EmailsPage() {
@@ -13,7 +14,6 @@ export default function EmailsPage() {
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState<string | null>(null);
   const [processing, setProcessing] = useState(false);
-  const [reauthorizing, setReauthorizing] = useState(false);
   const [filter, setFilter] = useState<string | undefined>();
   const [selectedEmail, setSelectedEmail] = useState<Email | null>(null);
   const [aiWorking, setAiWorking] = useState<number | null>(null);
@@ -22,7 +22,7 @@ export default function EmailsPage() {
   const load = async () => {
     setLoading(true);
     try {
-      const [e, s] = await Promise.all([api.emails.list({ category: filter, limit: 50 }), api.emails.stats()]);
+      const [e, s] = await Promise.all([api.emails.list({ category: filter, limit: 200 }), api.emails.stats()]);
       setEmails(e);
       setStats(s);
       setError(null);
@@ -44,25 +44,11 @@ export default function EmailsPage() {
   useEffect(() => { load(); }, [filter]);
   useEffect(() => { checkHealth(); }, []);
 
-  const reauthorize = async () => {
-    setReauthorizing(true);
-    setSyncMsg("A browser window will open for Google authorization. Complete it there, then this page will update.");
-    try {
-      const result = await api.emails.reauth();
-      setSyncMsg(result.connected ? "Google reconnected successfully." : "Re-authorization did not complete.");
-      await checkHealth();
-    } catch (err: any) {
-      setSyncMsg(err.message || "Re-authorization failed");
-    } finally {
-      setReauthorizing(false);
-    }
-  };
-
   const autoSyncRan = useRef(false);
   useEffect(() => {
     if (autoSyncRan.current) return;
     autoSyncRan.current = true;
-    api.emails.sync(10).then((result) => {
+    api.emails.sync(1000).then((result) => {
       if (result.added > 0) load();
     }).catch(() => {});
   }, []);
@@ -71,7 +57,7 @@ export default function EmailsPage() {
     setSyncing(true);
     setSyncMsg(null);
     try {
-      const result = await api.emails.sync(50);
+      const result = await api.emails.sync(1000);
       setSyncMsg(result.added > 0 ? `Imported ${result.added} new emails` : "No new emails");
       await load();
     } catch (err: any) {
@@ -85,7 +71,7 @@ export default function EmailsPage() {
     setProcessing(true);
     setSyncMsg(null);
     try {
-      const result = await api.emails.processAll(50);
+      const result = await api.emails.processAll(1000);
       setSyncMsg(`Processed ${result.processed} emails with AI${result.failed ? ` (${result.failed} failed)` : ""}${result.remaining ? `, ${result.remaining} remaining` : ""}`);
       await load();
     } catch (err: any) {
@@ -170,14 +156,14 @@ export default function EmailsPage() {
               {health.connected
                 ? "Gmail, Classroom and Calendar syncing is working."
                 : health.reason === "not_authorized"
-                  ? "No Google account connected yet. Connect one to sync Gmail, Classroom and Calendar."
-                  : "Your Google authorization expired and can't be refreshed (common for unverified/testing OAuth apps after 7 days). Re-authorize below."}
+                  ? "No Google account connected yet."
+                  : "Your Google authorization expired and can't be refreshed (common for unverified/testing OAuth apps after 7 days)."}
             </p>
           </div>
           {!health.connected && (
-            <button onClick={reauthorize} disabled={reauthorizing} className="btn-primary text-xs shrink-0 flex items-center gap-1.5">
-              <Plug className="w-3.5 h-3.5" /> {reauthorizing ? "Waiting for browser…" : "Re-authorize Google"}
-            </button>
+            <Link href="/settings" className="btn-primary text-xs shrink-0 flex items-center gap-1.5">
+              <Settings className="w-3.5 h-3.5" /> Connect in Settings
+            </Link>
           )}
         </div>
       )}

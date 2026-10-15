@@ -1,13 +1,20 @@
-from sqlalchemy import Column, Integer, String, Text, Boolean, DateTime
+from sqlalchemy import BigInteger, Column, ForeignKey, Integer, String, Text, Boolean, DateTime, UniqueConstraint
 from app.core.database import Base
 from app.models.base import TimestampMixin
 
 
 class Email(Base, TimestampMixin):
     __tablename__ = "emails"
+    __table_args__ = (
+        # Gmail message ids are unique per mailbox (per user here, since each
+        # user owns exactly one connected Google account). A global unique key
+        # would let one user's message id block another user's identical id,
+        # so uniqueness is scoped (user_id, message_id).
+        UniqueConstraint("user_id", "message_id", name="ux_emails_user_message_id"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
-    message_id = Column(String(512), unique=True, index=True)
+    message_id = Column(String(512), nullable=False)
     thread_id = Column(String(512))
     from_email = Column(String(256))
     from_name = Column(String(256))
@@ -27,3 +34,6 @@ class Email(Base, TimestampMixin):
     created_task_id = Column(Integer, nullable=True)
     retention_until = Column(DateTime, nullable=True)
     sensitivity = Column(String(16), nullable=True)
+    user_id = Column(
+        BigInteger, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )

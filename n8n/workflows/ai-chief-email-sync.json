@@ -1,0 +1,181 @@
+{
+  "id": "wMu2lTiUs3rSy0nC",
+  "name": "AI CHIEF · Multi-user Email Sync",
+  "nodes": [
+    {
+      "id": "MuTr1Ab2Cd3Ef4Gh",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        -320
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "MuSc5Ij6Kl7Mn8Op",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [
+        220,
+        -320
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 10
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "MuLt9Qr0St1Uv2Wx",
+      "name": "List Accounts",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        0,
+        -120
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.AI_CHIEF_BACKEND_URL || 'http://backend:8000' }}/api/integrations/agent/accounts",
+        "sendBody": false,
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "responseFormat": "json"
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "uPlTEMjHPTL0IZ1j",
+          "name": "AI Chief Ingest API"
+        }
+      }
+    },
+    {
+      "id": "MuSe3Yz4Ab5Cd6Ef",
+      "name": "Select Accounts",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        0,
+        120
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "mode": "runOnceForAllItems",
+        "jsCode": "\n// Each incoming item is a JSON array of trusted accounts from the backend's\n// GET /api/integrations/agent/accounts. Emit one item per account so the\n// sync node runs once per user with that user's account_id only.\nconst payload = $input.all()[0].json;\nif (!Array.isArray(payload)) return [{ json: [] }];\nreturn payload.map((a) => ({\n  json: { account_id: a.account_id, user_id: a.user_id, email: a.email },\n}));\n"
+      }
+    },
+    {
+      "id": "MuSy7Gh8Ij9Kl0Mn",
+      "name": "Sync Account",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        0,
+        360
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.AI_CHIEF_BACKEND_URL || 'http://backend:8000' }}/api/integrations/agent/sync",
+        "sendBody": true,
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "responseFormat": "json",
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ account_id: $json.account_id, limit: 50, auto_process: true }) }}"
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "uPlTEMjHPTL0IZ1j",
+          "name": "AI Chief Ingest API"
+        }
+      }
+    },
+    {
+      "id": "MuRp1Op2Qr3St4Uv",
+      "name": "Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        0,
+        600
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "mode": "runOnceForAllItems",
+        "jsCode": "\nconst runs = $input.all().map((i) => i.json);\nreturn [{\n  json: {\n    runs,\n    total_added: runs.reduce((s, r) => s + (r.added || 0), 0),\n    at: new Date().toISOString(),\n  },\n}];\n"
+      }
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "List Accounts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "List Accounts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "List Accounts": {
+      "main": [
+        [
+          {
+            "node": "Select Accounts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Select Accounts": {
+      "main": [
+        [
+          {
+            "node": "Sync Account",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sync Account": {
+      "main": [
+        [
+          {
+            "node": "Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": {},
+  "pinData": {},
+  "meta": {}
+}

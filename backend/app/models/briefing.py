@@ -1,13 +1,16 @@
-from sqlalchemy import Column, Integer, Text, DateTime, JSON
+from sqlalchemy import BigInteger, Column, ForeignKey, Integer, Text, DateTime, JSON, UniqueConstraint
 from app.core.database import Base
 from app.models.base import TimestampMixin
 
 
 class DailyBriefing(Base, TimestampMixin):
     __tablename__ = "daily_briefings"
+    __table_args__ = (
+        UniqueConstraint("user_id", "date", name="ux_daily_briefings_user_date"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
-    date = Column(DateTime, unique=True, index=True)
+    date = Column(DateTime)
     summary = Column(Text)
     meetings_count = Column(Integer, default=0)
     important_emails_count = Column(Integer, default=0)
@@ -18,3 +21,6 @@ class DailyBriefing(Base, TimestampMixin):
     email_highlights = Column(Text, nullable=True)
     task_highlights = Column(Text, nullable=True)
     full_briefing = Column(Text)
+    user_id = Column(
+        BigInteger, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )

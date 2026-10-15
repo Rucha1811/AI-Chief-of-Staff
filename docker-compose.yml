@@ -1,67 +1,137 @@
-version: "3.9"
-
 services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: ai_chief
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      # DEVELOPMENT-ONLY default. It exists so `docker compose up` works on a
+      # laptop with no setup, and it is NOT a production secret: anything
+      # reachable from outside the developer's machine would be exposed by it.
+      # Production deployments must set POSTGRES_PASSWORD (see
+      # docker-compose.prod.yml, which makes it mandatory) and the backend
+      # additionally refuses to start with ENVIRONMENT=production while
+      # DATABASE_URL carries this password.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-ai_chief}
+    command:
+      - "postgres"
+      - "-c"
+      - "idle_in_transaction_session_timeout=120000"
     ports:
-      - "5432:5432"
+      # Localhost-only by default: the database must never be LAN-reachable,
+      # especially with the development-only password. Set POSTGRES_HOST_BIND
+      # (e.g. 0.0.0.0) ONLY where remote access is explicitly intended.
+      - "${POSTGRES_HOST_BIND:-127.0.0.1}:${POSTGRES_HOST_PORT:-5434}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    networks:
+      - aichief
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
       interval: 5s
       timeout: 5s
       retries: 5
-
-  ollama:
-    image: ollama/ollama:latest
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama_data:/root/.ollama
-    command: serve
-    healthcheck:
-      test: ["CMD", "ollama", "list"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
 
   backend:
     build:
       context: ./backend
       dockerfile: Dockerfile
+    restart: unless-stopped
     ports:
-      - "8000:8000"
+      # Localhost-only by default; put a reverse proxy in front (or set
+      # BACKEND_HOST_BIND=0.0.0.0) for deliberate external exposure.
+      - "${BACKEND_HOST_BIND:-127.0.0.1}:${BACKEND_HOST_PORT:-8000}:8000"
     environment:
-      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/ai_chief
-      OLLAMA_BASE_URL: http://ollama:11434
-      OLLAMA_MODEL: qwen:7b
-      SECRET_KEY: change-this-to-a-secure-secret-key
+      # ENVIRONMENT=production turns on the hard secret policy in
+      # backend/app/core/config.py: explicit strong SECRET_KEY / INGEST_API_KEY
+      # / AUTH_PASSWORD, no development database password, no half-configured
+      # WhatsApp provider. The process refuses to start otherwise.
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@${POSTGRES_HOST:-postgres}:5432/${POSTGRES_DB:-ai_chief}
+      # SECRET_KEY / INGEST_API_KEY / AUTH_PASSWORD are deliberately NOT
+      # forwarded here: an empty compose value would OVERRIDE backend/.env
+      # (environment beats env_file in pydantic-settings) and silently
+      # disable login / rotate keys. In development the backend reads them
+      # from backend/.env or auto-generates a strong value into the
+      # gitignored 0600 files backend/.secret_key / backend/.ingest_key.
+      # Production sets them explicitly via docker-compose.prod.yml, which
+      # makes each one mandatory. BOOTSTRAP_TOKEN (one-time owner bootstrap)
+      # is forwarded by the production overlay only, and
+      # OAUTH_COOKIE_SECURE is not forwarded at all: an empty compose value
+      # would reach a boolean field as a parse error rather than as "unset".
+      # Both are configured in backend/.env / the overlay instead.
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:7b}
+      BACKEND_INTERNAL_URL: ${BACKEND_INTERNAL_URL:-http://backend:8000}
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      DB_POOL_SIZE: ${DB_POOL_SIZE:-20}
+      DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-30}
+      WHATSAPP_PROVIDER: ${WHATSAPP_PROVIDER:-none}
+      TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
+      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}
+      # No default number: a real phone number must never be baked into a
+      # tracked file. Required whenever WHATSAPP_PROVIDER is twilio.
+      TWILIO_WHATSAPP_FROM: ${TWILIO_WHATSAPP_FROM:-}
+      WHATSAPP_SEND_TO: ${WHATSAPP_SEND_TO:-}
+      META_WA_PHONE_NUMBER_ID: ${META_WA_PHONE_NUMBER_ID:-}
+      META_WA_ACCESS_TOKEN: ${META_WA_ACCESS_TOKEN:-}
+      META_WA_APP_SECRET: ${META_WA_APP_SECRET:-}
+      META_WA_VERIFY_TOKEN: ${META_WA_VERIFY_TOKEN:-}
     depends_on:
       postgres:
         condition: service_healthy
-      ollama:
-        condition: service_started
     volumes:
       - ./backend:/app
       - uploads:/app/uploads
+    networks:
+      - aichief
 
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      args:
+        # NEXT_PUBLIC_* is INLINED into the browser bundle by `next build`, so
+        # the value has to exist at BUILD time. The runtime `environment:`
+        # entry that used to sit here could not change an already-built bundle;
+        # it only looked like it could. Production passes the same argument
+        # without a default (docker-compose.prod.yml), so a production image
+        # cannot be built without a real backend URL.
+        NEXT_PUBLIC_API_URL: ${FRONTEND_API_URL:-http://localhost:8000}
+    restart: unless-stopped
     ports:
-      - "3000:3000"
-    environment:
-      NEXT_PUBLIC_API_URL: http://localhost:8000
+      - "${FRONTEND_HOST_BIND:-127.0.0.1}:${FRONTEND_HOST_PORT:-3000}:3000"
     depends_on:
       - backend
+    networks:
+      - aichief
+
+  # Optional shared Ollama sidecar. When running Ollama natively on the host
+  # (macOS), leave OLLAMA_BASE_URL pointing at host.docker.internal. On Linux /
+  # production, either run the sidecar below or set OLLAMA_BASE_URL to the
+  # reachable URL. Enabling the sidecar publishes 11434 so the backend's
+  # host.docker.internal URL still resolves. Safe to enable when Ollama is not
+  # installed on the host.
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      # Ollama has no authentication: localhost-only by default so the LAN
+      # cannot drive the model. Set OLLAMA_HOST_BIND=0.0.0.0 only if the
+      # backend genuinely runs on another host.
+      - "${OLLAMA_HOST_BIND:-127.0.0.1}:${OLLAMA_HOST_PORT:-11434}:11434"
+    networks:
+      - aichief
+
+networks:
+  aichief:
+    name: aichief_net
+    driver: bridge
 
 volumes:
   pgdata:
-  ollama_data:
   uploads:
+  ollama_data:

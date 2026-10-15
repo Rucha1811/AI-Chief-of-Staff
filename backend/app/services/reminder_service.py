@@ -1,8 +1,9 @@
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 from sqlalchemy import select
 
 from app.core.database import SessionLocal
+from app.core.timeutil import utcnow
 from app.models.assignment import Assignment
 from app.models.email import Email
 from app.models.event import Event
@@ -17,9 +18,9 @@ _last_regen = None
 def _regen_due(force: bool) -> bool:
     global _last_regen
     if force:
-        _last_regen = datetime.now()
+        _last_regen = utcnow()
         return True
-    now = datetime.now()
+    now = utcnow()
     if _last_regen is not None and now - _last_regen < _REGEN_MIN_INTERVAL:
         return False
     _last_regen = now
@@ -36,9 +37,19 @@ def _human(delta: timedelta) -> str:
     return f"in {hours}h"
 
 
-def _add(session, ntype, title, message, entity_type, entity_id, priority, fingerprint):
+def _add(session, ntype, title, message, entity_type, entity_id, priority, fingerprint, user_id):
     existing = session.execute(
-        select(Notification).where(Notification.fingerprint == fingerprint)
+        select(Notification).where(
+            Notification.user_id == user_id,
+            (
+                (Notification.fingerprint == fingerprint)
+                | (
+                    (Notification.type == ntype)
+                    & (Notification.title == title)
+                    & (Notification.message == message)
+                )
+            ),
+        )
     ).scalar_one_or_none()
     if existing:
         return None
@@ -51,6 +62,7 @@ def _add(session, ntype, title, message, entity_type, entity_id, priority, finge
             entity_id=entity_id,
             priority=priority,
             fingerprint=fingerprint,
+            user_id=user_id,
         )
     )
     return True
@@ -59,7 +71,12 @@ def _add(session, ntype, title, message, entity_type, entity_id, priority, finge
 def generate_reminders(force: bool = False) -> int:
     if not _regen_due(force):
         return 0
-    now = datetime.now()
+    # Reminder windows and the read-notification retention purge both compare
+    # against created_at / due fields. Those are written either by the
+    # database clock (func.now(), UTC) or by this same UTC-convention, so the
+    # comparison clock must be UTC too - a host-local now() would skew every
+    # window by the host's offset (D5).
+    now = utcnow()
     created = 0
     with SessionLocal() as session:
         events = session.execute(
@@ -80,6 +97,7 @@ def generate_reminders(force: bool = False) -> int:
                 ev.id,
                 "normal",
                 f"event:{ev.id}:{ev.start_time.strftime('%Y-%m-%d')}",
+                ev.user_id,
             )
             created += int(n is not None)
 
@@ -101,6 +119,7 @@ def generate_reminders(force: bool = False) -> int:
                 t.id,
                 "high" if overdue else "normal",
                 f"task:{t.id}:{t.due_date.strftime('%Y-%m-%d')}",
+                t.user_id,
             )
             created += int(n is not None)
 
@@ -122,6 +141,7 @@ def generate_reminders(force: bool = False) -> int:
                 em.id,
                 "high" if overdue else "normal",
                 f"email:{em.id}:{em.deadline_at.strftime('%Y-%m-%d')}",
+                em.user_id,
             )
             created += int(n is not None)
 
@@ -145,6 +165,7 @@ def generate_reminders(force: bool = False) -> int:
                 ex.id,
                 "high" if days_left <= 3 else "normal",
                 f"exam:{ex.id}:{ex.exam_date.strftime('%Y-%m-%d')}",
+                ex.user_id,
             )
             created += int(n is not None)
 
@@ -167,6 +188,7 @@ def generate_reminders(force: bool = False) -> int:
                 asg.id,
                 "high" if overdue else "normal",
                 f"assignment:{asg.id}:{asg.due_date.strftime('%Y-%m-%d')}",
+                asg.user_id,
             )
             created += int(n is not None)
 

@@ -5,10 +5,9 @@ from sqlalchemy.exc import IntegrityError
 
 from app.core.database import SessionLocal
 from app.models.google_auth_state import GoogleAuthState
+from app.services.ownership import owner_user_id
 
 logger = logging.getLogger(__name__)
-
-SINGLETON_ID = 1
 
 
 def _naive_utc(dt):
@@ -33,19 +32,24 @@ def _default_state() -> dict:
 
 class AuthStateStore:
     """Persists Google authorization health across restarts so the app can
-    surface a clear "re-authorize" state instead of failing silently."""
+    surface a clear "re-authorize" state instead of failing silently.
+
+    One row per user (see migration 0005). A missing user_id falls back to
+    the owner (legacy single-user behavior)."""
 
     @staticmethod
-    def _row(db):
+    def _row(db, user_id=None):
+        user_id = user_id or owner_user_id(db)
         row = (
             db.query(GoogleAuthState)
-            .filter(GoogleAuthState.id == SINGLETON_ID)
+            .filter(GoogleAuthState.user_id == user_id)
+            .order_by(GoogleAuthState.id.asc())
             .first()
         )
         if row is not None:
             return row
         try:
-            row = GoogleAuthState(id=SINGLETON_ID, state="unknown")
+            row = GoogleAuthState(state="unknown", user_id=user_id)
             db.add(row)
             db.flush()
             return row
@@ -53,20 +57,24 @@ class AuthStateStore:
             db.rollback()
             return (
                 db.query(GoogleAuthState)
-                .filter(GoogleAuthState.id == SINGLETON_ID)
+                .filter(GoogleAuthState.user_id == user_id)
+                .order_by(GoogleAuthState.id.asc())
                 .first()
             )
 
     @staticmethod
-    def get_state() -> dict:
+    def get_state(user_id=None) -> dict:
         try:
             db = SessionLocal()
         except Exception:
             return _default_state()
         try:
+            if user_id is None:
+                user_id = owner_user_id(db)
             row = (
                 db.query(GoogleAuthState)
-                .filter(GoogleAuthState.id == SINGLETON_ID)
+                .filter(GoogleAuthState.user_id == user_id)
+                .order_by(GoogleAuthState.id.asc())
                 .first()
             )
         except Exception:
@@ -89,14 +97,14 @@ class AuthStateStore:
 
     @staticmethod
     def set_state(state: str, reason: str = None, last_error: str = None,
-                  expires_at=None, email: str = None) -> None:
+                  expires_at=None, email: str = None, user_id=None) -> None:
         try:
             db = SessionLocal()
         except Exception:
             logger.warning("Could not open DB session to record Google auth state")
             return
         try:
-            row = AuthStateStore._row(db)
+            row = AuthStateStore._row(db, user_id=user_id)
             row.state = state
             row.reason = reason
             row.last_error = last_error
@@ -114,19 +122,19 @@ class AuthStateStore:
             db.close()
 
     @staticmethod
-    def renew_expiry(expires_at=None, email: str = None) -> None:
+    def renew_expiry(expires_at=None, email: str = None, user_id=None) -> None:
         AuthStateStore.set_state(
-            "healthy", reason="ok", expires_at=expires_at, email=email
+            "healthy", reason="ok", expires_at=expires_at, email=email, user_id=user_id
         )
 
     @staticmethod
-    def mark_dead(reason: str = "expired", last_error: str = None) -> None:
+    def mark_dead(reason: str = "expired", last_error: str = None, user_id=None) -> None:
         try:
             db = SessionLocal()
         except Exception:
             return
         try:
-            row = AuthStateStore._row(db)
+            row = AuthStateStore._row(db, user_id=user_id)
             row.state = "unhealthy"
             row.reason = reason
             row.last_error = last_error

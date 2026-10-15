@@ -1,0 +1,267 @@
+{
+  "name": "AI CHIEF · Phase 2 Monitor",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 15
+            }
+          ]
+        }
+      },
+      "id": "p2-sched-0001",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        -320
+      ],
+      "credentials": {}
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.AI_CHIEF_BACKEND_URL + '/api/emails/sync?limit=20' }}",
+        "sendBody": false,
+        "responseFormat": "json",
+        "fullResponse": true,
+        "options": {},
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpBearerAuth"
+      },
+      "id": "p2-sync-0002",
+      "name": "1 · Sync Emails (Gmail)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        0,
+        0
+      ],
+      "credentials": {
+        "httpBearerAuth": {
+          "id": "p2-cred-jwt",
+          "name": "AI Chief Backend JWT"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.AI_CHIEF_BACKEND_URL + '/api/emails?limit=50&category=important' }}",
+        "sendBody": false,
+        "responseFormat": "json",
+        "options": {},
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpBearerAuth"
+      },
+      "id": "p2-fetch-0003",
+      "name": "2 · Fetch Important Emails",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        240,
+        0
+      ],
+      "credentials": {
+        "httpBearerAuth": {
+          "id": "p2-cred-jwt",
+          "name": "AI Chief Backend JWT"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "mode": "runOnceForAllItems",
+        "jsCode": "// AI Chief Phase 2: extract important/deadline emails and mark whether each\n// needs attention. Uses summary + has_deadline (already computed by the backend\n// Ollama pipeline). No secrets here.\nconst items = $input.all();\nconst out = [];\nfor (const item of items) {\n  const r = item.json || item || {};\n  const arr = Array.isArray(r) ? r : (Array.isArray(r.data) ? r.data : (Array.isArray(r.results) ? r.results : [r]));\n  for (const e of arr) {\n    if (!e || !e.id) continue;\n    const hasDeadline = !!e.has_deadline;\n    const deadline = e.deadline_at ? String(e.deadline_at) : null;\n    out.push({\n      json: {\n        email_id: e.id,\n        subject: e.subject ? String(e.subject) : '(no subject)',\n        from_email: e.from_email ? String(e.from_email) : '',\n        category: e.category ? String(e.category) : 'unknown',\n        has_deadline: hasDeadline,\n        deadline_at: deadline,\n        summary: e.summary ? String(e.summary).slice(0, 300) : '',\n        needs_attention: hasDeadline || e.category === 'reply_required',\n        message_id: e.message_id ? String(e.message_id) : ''\n      }\n    });\n  }\n}\nreturn out;"
+      },
+      "id": "p2-reduce-0004",
+      "name": "3 · Normalize Important List",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        0
+      ],
+      "credentials": {}
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "p2-if-0005",
+              "leftValue": "={{ $json.needs_attention }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "p2-if-0005",
+      "name": "4 · IF needs attention?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        720,
+        0
+      ],
+      "credentials": {}
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "mode": "runOnceForAllItems",
+        "jsCode": "// AI Chief Phase 2: build a list of actionable items for the alert/log step.\nconst items = $input.all();\nconst notices = items.map(it => ({\n  email_id: it.json.email_id,\n  subject: it.json.subject,\n  from: it.json.from_email,\n  deadline: it.json.deadline_at,\n  summary: it.json.summary,\n  reason: it.json.has_deadline ? 'has deadline' : 'reply required'\n}));\nreturn notices.length\n  ? [{ json: { count: notices.length, items: notices } }]\n  : [{ json: { count: 0, items: [] } }];"
+      },
+      "id": "p2-summary-0006",
+      "name": "5 · Summarize Actionable",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        960,
+        0
+      ],
+      "credentials": {}
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "mode": "runOnceForAllItems",
+        "jsCode": "// AI Chief Phase 2: log the outcome. Requires no external service.\nconst item = $input.first();\nconst data = item.json;\nreturn [{\n  json: {\n    checked_at: new Date().toISOString(),\n    actionable_count: data.count,\n    sentinel: 'AI_CHIEF_PHASE2_OK',\n    items_preview: (data.items || []).slice(0, 5).map(i => i.subject)\n  }\n}];"
+      },
+      "id": "p2-log-0007",
+      "name": "6 · Log Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        0
+      ],
+      "credentials": {}
+    },
+    {
+      "parameters": {
+        "options": {
+          "language": "js",
+          "logs": "={{ JSON.stringify($json) }}",
+          "level": "info"
+        },
+        "options": {},
+        "text": "='AI CHIEF Phase2 check: count=' + ($json.actionable_count || $json.count || 0)"
+      },
+      "id": "p2-logger-0008",
+      "name": "7 · Logger Output",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1200,
+        220
+      ],
+      "credentials": {}
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "1 · Sync Emails (Gmail)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "1 · Sync Emails (Gmail)": {
+      "main": [
+        [
+          {
+            "node": "2 · Fetch Important Emails",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "2 · Fetch Important Emails": {
+      "main": [
+        [
+          {
+            "node": "3 · Normalize Important List",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "3 · Normalize Important List": {
+      "main": [
+        [
+          {
+            "node": "4 · IF needs attention?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "4 · IF needs attention?": {
+      "main": [
+        [
+          {
+            "node": "5 · Summarize Actionable",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "5 · Summarize Actionable": {
+      "main": [
+        [
+          {
+            "node": "6 · Log Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "6 · Log Result": {
+      "main": [
+        [
+          {
+            "node": "7 · Logger Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": {},
+  "pinData": {},
+  "meta": {
+    "instanceId": "aichief-phase2-monitor"
+  }
+}

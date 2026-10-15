@@ -267,8 +267,8 @@ export default function TimetablePage() {
             </div>
             {!classStatus?.connected ? (
               <p className="text-xs text-slate-500 leading-relaxed">
-                {classStatus?.reason} To enable it, re-authorize your Google account
-                with the Classroom scope, then sync your courses and assignments here.
+                {classStatus?.reason} To enable it, connect your Google account
+                in Settings, then sync your courses and assignments here.
               </p>
             ) : (
               <div className="space-y-2">

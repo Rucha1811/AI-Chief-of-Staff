@@ -8,6 +8,8 @@ from app.models.event import Event
 from app.models.task import Task
 from app.models.assignment import Assignment
 from app.models.document import Document
+from app.models.user import User
+from app.api.deps import get_current_user
 from app.services.gmail_service import get_account_email
 from app.services.auth_state import AuthStateStore
 
@@ -15,46 +17,53 @@ router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
 
 @router.get("")
-async def get_dashboard(db: Session = Depends(get_db)) -> dict:
+async def get_dashboard(
+    user: User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> dict:
     today = date.today()
     now = datetime.now()
     day_start = datetime.combine(today, datetime.min.time())
     day_end = datetime.combine(today, datetime.max.time())
+    uid = user.id
 
     email_stats = {
-        "total": db.query(Email).count(),
-        "unread": db.query(Email).filter(Email.is_read == False).count(),
-        "reply_required": db.query(Email).filter(Email.category == "reply_required").count(),
-        "important": db.query(Email).filter(Email.category == "important").count(),
-        "with_deadlines": db.query(Email).filter(Email.has_deadline == True).count(),
+        "total": db.query(Email).filter(Email.user_id == uid).count(),
+        "unread": db.query(Email).filter(Email.user_id == uid, Email.is_read == False).count(),
+        "reply_required": db.query(Email).filter(Email.user_id == uid, Email.category == "reply_required").count(),
+        "important": db.query(Email).filter(Email.user_id == uid, Email.category == "important").count(),
+        "with_deadlines": db.query(Email).filter(Email.user_id == uid, Email.has_deadline == True).count(),
     }
 
     today_events = db.query(Event).filter(
+        Event.user_id == uid,
         Event.start_time >= day_start,
         Event.end_time <= day_end,
     ).count()
 
     conflicts = db.query(Event).filter(
+        Event.user_id == uid,
         Event.start_time >= day_start,
         Event.end_time <= day_end,
         Event.is_conflict == True,
     ).count()
 
     tasks = {
-        "total": db.query(Task).count(),
-        "pending": db.query(Task).filter(Task.status == "pending").count(),
-        "in_progress": db.query(Task).filter(Task.status == "in_progress").count(),
-        "completed": db.query(Task).filter(Task.status == "completed").count(),
+        "total": db.query(Task).filter(Task.user_id == uid).count(),
+        "pending": db.query(Task).filter(Task.user_id == uid, Task.status == "pending").count(),
+        "in_progress": db.query(Task).filter(Task.user_id == uid, Task.status == "in_progress").count(),
+        "completed": db.query(Task).filter(Task.user_id == uid, Task.status == "completed").count(),
         "overdue": db.query(Task).filter(
+            Task.user_id == uid,
             Task.status.in_(["pending", "in_progress"]),
             Task.due_date < now,
         ).count(),
     }
 
-    documents_count = db.query(Document).count()
+    documents_count = db.query(Document).filter(Document.user_id == uid).count()
 
     deadlines = []
     for t in db.query(Task).filter(
+        Task.user_id == uid,
         Task.status.in_(["pending", "in_progress"]),
         Task.due_date.isnot(None),
     ).all():
@@ -68,6 +77,7 @@ async def get_dashboard(db: Session = Depends(get_db)) -> dict:
             }
         )
     for a in db.query(Assignment).filter(
+        Assignment.user_id == uid,
         Assignment.status.in_(["todo", "in_progress"]),
         Assignment.due_date.isnot(None),
     ).all():
@@ -81,6 +91,7 @@ async def get_dashboard(db: Session = Depends(get_db)) -> dict:
             }
         )
     for e in db.query(Email).filter(
+        Email.user_id == uid,
         Email.has_deadline.is_(True),
         Email.deadline_at.isnot(None),
     ).all():
@@ -112,6 +123,7 @@ async def get_dashboard(db: Session = Depends(get_db)) -> dict:
         }
         for e in db.query(Email)
         .filter(
+            Email.user_id == uid,
             Email.category.in_(["important", "reply_required"]),
             Email.is_read == False,
         )
@@ -130,7 +142,7 @@ async def get_dashboard(db: Session = Depends(get_db)) -> dict:
         "deadline_count": deadline_count,
         "deadline_this_week": deadline_this_week,
         "important_emails": important_emails,
-        "student_email": await get_account_email(),
-        "google_auth": AuthStateStore.get_state(),
+        "student_email": await get_account_email(db=db, user_id=uid),
+        "google_auth": AuthStateStore.get_state(user_id=uid),
         "date": today.isoformat(),
     }

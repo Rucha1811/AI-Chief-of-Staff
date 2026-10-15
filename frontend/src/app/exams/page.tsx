@@ -3,13 +3,14 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, type Exam } from "@/lib/api";
 import BackButton from "@/components/BackButton";
-import { GraduationCap, Plus, Trash2, CalendarDays, Clock, MapPin } from "lucide-react";
+import { GraduationCap, Plus, Trash2, CalendarDays, Clock, MapPin, BookOpen } from "lucide-react";
 
 export default function ExamsPage() {
   const [exams, setExams] = useState<Exam[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
+  const [planning, setPlanning] = useState(false);
 
   const [title, setTitle] = useState("");
   const [subject, setSubject] = useState("");
@@ -93,12 +94,25 @@ export default function ExamsPage() {
     }
   };
 
+  const planLearning = async () => {
+    setPlanning(true);
+    setError(null);
+    try {
+      const result = await api.events.planExams(3, 120, false);
+      setError(result.message || `Learning plan ready: ${result.events_created} calendar study blocks and ${result.tasks_created} tasks created.`);
+    } catch (err: any) {
+      setError(err.message || "Failed to create the exam learning plan");
+    } finally {
+      setPlanning(false);
+    }
+  };
+
   const fmtDate = (iso: string) => {
     const d = new Date(iso);
     return d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
   };
 
-  const upcoming = exams.filter((e) => e.status === "upcoming");
+  const upcoming = exams.filter((e) => e.status === "upcoming" && new Date(e.exam_date).getTime() > Date.now());
   const completed = exams.filter((e) => e.status === "completed");
 
   return (
@@ -115,9 +129,14 @@ export default function ExamsPage() {
           <h1 className="text-2xl font-bold text-gradient mt-3">Exam Schedule</h1>
           <p className="text-slate-500 mt-1">{upcoming.length} upcoming · {completed.length} completed</p>
         </div>
-        <button onClick={() => setShowForm((s) => !s)} className="btn-primary flex items-center gap-2">
-          <Plus className="w-4 h-4" /> Add exam
-        </button>
+        <div className="flex items-center gap-2">
+          <button onClick={planLearning} disabled={planning || upcoming.length === 0} className="btn-secondary flex items-center gap-2">
+            <BookOpen className="w-4 h-4" /> {planning ? "Planning…" : "Plan learning"}
+          </button>
+          <button onClick={() => setShowForm((s) => !s)} className="btn-primary flex items-center gap-2">
+            <Plus className="w-4 h-4" /> Add exam
+          </button>
+        </div>
       </div>
 
       {showForm && (

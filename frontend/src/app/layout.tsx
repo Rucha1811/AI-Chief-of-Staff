@@ -5,6 +5,7 @@ import Sidebar from "@/components/Sidebar";
 import AuthGate from "@/components/AuthGate";
 import NotificationBell from "@/components/NotificationBell";
 import RegisterSW from "@/components/RegisterSW";
+import VoiceAssistant from "@/components/VoiceAssistant";
 
 const inter = Inter({ subsets: ["latin"] });
 
@@ -32,6 +33,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           <main className="md:ml-[76px] lg:ml-64 min-h-screen p-4 pt-20 md:p-6 lg:p-8 pb-16 md:pb-8">
             {children}
           </main>
+          <VoiceAssistant />
         </AuthGate>
       </body>
     </html>

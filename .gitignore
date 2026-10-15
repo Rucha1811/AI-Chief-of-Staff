@@ -1,19 +1,40 @@
 node_modules/
 .next/
+.next-dev/
 __pycache__/
 *.pyc
 venv/
 .env
+.env.*
+!.env.example
+!docker-compose.env.example
+.n8n.env
 .secret_key
+.ingest_key
+.admin_key
 uploads/
 *.egg-info/
 dist/
 build/
 .DS_Store
 *.db
+*.err
 *.tsbuildinfo
-backend/credentials/credentials.json
-backend/credentials/token.pickle
+test_gmail.py
+
+# Credential-derived material (P24B-08).
+# Directory-level rules, not an enumeration of filenames: anything the app or a
+# library may drop into these directories is secret by definition (OAuth client
+# secrets, refresh tokens, VAPID private keys, key files, database dumps).
+# A new file name cannot leak by simply not being listed.
+backend/credentials/
 backend/vapid/
 backend/cache/
-test_gmail.py
+# Local secret files, anchored so the tracked templates stay trackable.
+backend/.secret_key
+backend/.ingest_key
+backend/.secret_key.*
+backend/.ingest_key.*
+
+# backups
+backups/

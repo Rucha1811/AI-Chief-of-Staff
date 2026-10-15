@@ -1,0 +1,218 @@
+# Production overlay for the AI Chief of Staff stack.
+#
+#   cp docker-compose.env.example .env   # then fill in real values
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml config
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# `config` is a read-only merge check: run it before `up` to see exactly what
+# would be created. Nothing in this file names a production domain, because
+# the deployment's hostname does not exist yet - every host-specific value is
+# supplied through the environment (FRONTEND_API_URL, FRONTEND_URL,
+# OAUTH_REDIRECT_URI, CORS_ORIGINS, OLLAMA_BASE_URL).
+#
+# Two separate concerns live here:
+#
+# 1. REQUIRED CONFIGURATION. "${VAR:?message}" makes `docker compose` abort
+#    when a variable is missing or empty instead of falling back to a
+#    development default. The backend re-checks the same policy at boot
+#    (backend/app/core/config.py, enforce_settings), so an incomplete
+#    deployment fails loudly twice, before it serves a request. Validation
+#    errors name the VARIABLE and never echo its value, so no secret can leak
+#    into a log, a CI transcript or a crash report.
+#
+#    Google OAuth is deliberately NOT in the mandatory list: the Google
+#    integration can be switched off, and requiring client credentials for an
+#    integration nobody uses would make an otherwise valid deployment
+#    unstartable. Leave them empty to disable Google sign-in/sync.
+#
+# 2. CONTAINER HARDENING (D5). Production runs the built image, never the
+#    developer's checkout:
+#
+#      * `volumes: !override` REPLACES the base file's list instead of merging
+#        with it. A plain `ports:`/`volumes:` entry would be merged with
+#        docker-compose.yml and the `./backend:/app` source bind mount would
+#        survive - which is precisely the bug this overlay exists to fix.
+#        (`docker compose config` shows the merged result; the bind must be
+#        absent from it.)
+#      * non-root uid, no-new-privileges, every Linux capability dropped,
+#        read-only root filesystem with an explicit list of writable paths,
+#        and memory/CPU ceilings.
+#
+# Writable paths are listed one by one because the read-only root filesystem
+# makes an omission fail at the first write:
+#   /tmp                -> tmpfs (OCR/PDF/sort temp files, Python scratch)
+#   /app/uploads        -> volume, user documents
+#   /app/cache          -> volume, news + Gmail profile cache (written on a
+#                          cache miss with no retry path around it)
+#   /app/vapid          -> volume, VAPID key pair. Persistent on purpose:
+#                          regenerating this key invalidates every stored push
+#                          subscription.
+# /app/credentials is intentionally NOT writable: Google OAuth credentials
+# live in the database, and credentials/ only holds the read-only client
+# file. The image ships without it anyway (backend/.dockerignore).
+services:
+  postgres:
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER must be set}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set (no default in production)}
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB must be set}
+
+    # Not merely localhost-bound: not published at all. The backend reaches
+    # the database as `postgres:5432` on the compose network, operators use
+    # `docker exec aichief-postgres-1 psql ...`, and the Phase C backup script
+    # runs pg_dump the same way - so no host port is needed, and the
+    # development `127.0.0.1:5434` shortcut cannot be copy/pasted into
+    # production by accident.
+    ports: !override []
+
+    # Deliberately no `read_only`, no `cap_drop` and no `no-new-privileges`
+    # here: the official image's entrypoint starts as root and hands off to
+    # the postgres user before exec-ing the server, and its data directory
+    # needs CHOWN/FOWNER/SETUID/SETGID to initialise. Those three settings
+    # have NOT been verified against this image (verification would require
+    # starting containers, which this phase forbids), and guessing on the
+    # database is how a deployment loses its data directory. Exposure is
+    # instead removed at the network level above, and the host-level ceiling
+    # below stops an unbounded buffer pool from eating the VPS.
+    deploy:
+      resources:
+        limits:
+          cpus: "${POSTGRES_CPUS_LIMIT:-1.0}"
+          memory: ${POSTGRES_MEM_LIMIT:-1g}
+
+  backend:
+    # Host configuration, never baked configuration. backend/.dockerignore
+    # keeps .env, .secret_key, .ingest_key, credentials/ and vapid/ out of the
+    # image layers, and this overlay removes the ./backend bind mount, so this
+    # env_file is what keeps non-secret business settings (schedule defaults,
+    # retention, classroom ids, VAPID contact address) configurable in
+    # production. `required: false` keeps a checkout that has no backend/.env
+    # valid. Anything listed under `environment:` below always overrides an
+    # env_file entry, which is what makes the mandatory secrets mandatory.
+    env_file:
+      - path: ./backend/.env
+        required: false
+
+    environment:
+      ENVIRONMENT: production
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY must be set (min 32 chars, e.g. python -c "import secrets;print(secrets.token_urlsafe(48))")}
+      INGEST_API_KEY: ${INGEST_API_KEY:?INGEST_API_KEY must be set (min 32 chars, used by n8n for server-to-server calls)}
+      AUTH_PASSWORD: ${AUTH_PASSWORD:?AUTH_PASSWORD must be set (min 12 chars, or a pbkdf2$... hash); empty disables authentication entirely}
+      # Optional and intentionally NOT mandatory: it authorizes exactly one
+      # action - creating the FIRST (owner) account - and is spent immediately.
+      # Empty means first-owner creation is refused (fail closed), so an
+      # already-provisioned deployment restarts without having to invent a
+      # throwaway secret. See docker-compose.env.example for the 3-step
+      # provisioning recipe.
+      BOOTSTRAP_TOKEN: ${BOOTSTRAP_TOKEN:-}
+      # D3: the deployment's own addresses. These three are what the backend
+      # startup gate refuses to start without (it rejects localhost, an
+      # unparseable origin, or an empty CORS list in production), so setting
+      # them here and nowhere else keeps one spelling of the truth.
+      FRONTEND_URL: ${FRONTEND_URL:?FRONTEND_URL must be set to the public browser-facing origin, e.g. https://app.example.com}
+      OAUTH_REDIRECT_URI: ${OAUTH_REDIRECT_URI:?OAUTH_REDIRECT_URI must be set to the public backend origin + /api/integrations/google/callback, e.g. https://api.example.com/api/integrations/google/callback}
+      CORS_ORIGINS: ${CORS_ORIGINS:?CORS_ORIGINS must be set to the deployed browser origin(s), comma-separated, e.g. https://app.example.com}
+      # host.docker.internal only resolves on Docker Desktop. On a Linux VPS
+      # the Ollama sidecar in docker-compose.yml is the reachable one, so the
+      # value must be stated rather than defaulted into silence.
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:?OLLAMA_BASE_URL must be set (http://ollama:11434 for the bundled sidecar, or the reachable Ollama URL)}
+      # Optional: comma-separated proxy addresses whose X-Forwarded-For is
+      # believed for login rate limiting. EMPTY (the default) trusts no proxy
+      # and therefore cannot be spoofed; set it only once a reverse proxy
+      # actually exists in front of this service.
+      TRUSTED_PROXY_IPS: ${TRUSTED_PROXY_IPS:-}
+      # Google OAuth stays optional on purpose: an empty value disables the
+      # Google integration instead of blocking a deployment that does not use
+      # it. Set both to enable Google sign-in and sync.
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+
+    # THE FIX for the inherited development bind mount. Without !override,
+    # compose would merge this list with `- ./backend:/app` and production
+    # would keep serving the host checkout instead of the built image.
+    volumes: !override
+      - uploads:/app/uploads
+      - app_cache:/app/cache
+      - vapid_keys:/app/vapid
+
+    # Run the built image as an unprivileged user. backend/Dockerfile creates
+    # uid/gid 10001 (it does NOT switch users itself, so the development
+    # bind-mounted checkout keeps working as root); the numeric ids exist in
+    # /etc/passwd in the image, so no username is required here.
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # Port 8000 is unprivileged and the app needs no Linux capability beyond
+    # that, so dropping ALL costs nothing here. (It is NOT done for postgres -
+    # see the note in that service.)
+
+    deploy:
+      resources:
+        limits:
+          # 1.5 GiB / 1.5 CPU. The backend is the OCR/PDF path: tesseract and
+          # pdfplumber each load a document into memory, and a 20-connection
+          # pool plus two AI workers sits on top. The ceiling is high enough
+          # for a large upload and low enough that a runaway parse cannot take
+          # the whole VPS with it. Override with BACKEND_MEM_LIMIT /
+          # BACKEND_CPUS_LIMIT if uploads legitimately get bigger.
+          cpus: "${BACKEND_CPUS_LIMIT:-1.5}"
+          memory: ${BACKEND_MEM_LIMIT:-1536m}
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        # Build-time, never runtime: NEXT_PUBLIC_* is inlined by `next build`
+        # and a running container's `environment:` cannot rewrite an
+        # already-built bundle. `:?` means a production image cannot even be
+        # built without the real browser-facing backend URL, and the empty
+        # default in frontend/Dockerfile is never used here.
+        NEXT_PUBLIC_API_URL: ${FRONTEND_API_URL:?FRONTEND_API_URL must be set (public browser-facing backend URL, e.g. https://api.example.com)}
+
+    # node:20-alpine already ships the `node` user (uid 1000) and
+    # frontend/Dockerfile switches to it; stated explicitly so the intent is
+    # visible in the merged config rather than only in the Dockerfile.
+    user: "1000:1000"
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777
+      # Next's standalone server writes its image/ISR cache under .next.
+      - /app/.next/cache:mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+    deploy:
+      resources:
+        limits:
+          # Next.js standalone is a few dozen MB of resident memory; 512 MiB
+          # / 0.5 CPU leaves room for concurrent SSR without letting a burst
+          # starve the backend or Postgres. Override with
+          # FRONTEND_MEM_LIMIT / FRONTEND_CPUS_LIMIT.
+          cpus: "${FRONTEND_CPUS_LIMIT:-0.5}"
+          memory: ${FRONTEND_MEM_LIMIT:-512m}
+
+  ollama:
+    # Pinned to loopback regardless of OLLAMA_HOST_BIND: Ollama has no
+    # authentication, so an .env saying 0.0.0.0 must not be able to publish
+    # the model server to the LAN. The backend reaches the sidecar over the
+    # compose network (OLLAMA_BASE_URL=http://ollama:11434), which needs no
+    # published port at all; this one exists only so a host-side client can
+    # still reach it.
+    ports: !override
+      - "127.0.0.1:11434:11434"
+    # No resource limit on purpose. A loaded model is measured in GiB - an
+    # arbitrary ceiling here would OOM-kill inference mid-request, which is
+    # worse than an unconstrained sidecar. Constrain the host, not this
+    # service.
+
+volumes:
+  app_cache:
+  vapid_keys:

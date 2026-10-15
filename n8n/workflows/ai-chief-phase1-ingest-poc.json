@@ -1,0 +1,195 @@
+{
+  "name": "AI CHIEF · Phase 1 Ingest POC",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "p1-trigger-0001",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        -320
+      ],
+      "credentials": {}
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8000/api/emails/sync?limit=3",
+        "sendBody": false,
+        "responseFormat": "json",
+        "fullResponse": true,
+        "options": {},
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpBearerAuth"
+      },
+      "id": "p1-sync-0002",
+      "name": "1 · Sync (backend Gmail, limit 3)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        0,
+        0
+      ],
+      "credentials": {
+        "httpBearerAuth": {
+          "id": "p1-cred-jwt",
+          "name": "AI Chief Backend JWT"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "http://host.docker.internal:8000/api/emails?limit=3",
+        "sendBody": false,
+        "sendHeaders": true,
+        "responseFormat": "json",
+        "options": {},
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpBearerAuth"
+      },
+      "id": "p1-read-0003",
+      "name": "2 · Read newest rows",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        220,
+        0
+      ],
+      "credentials": {
+        "httpBearerAuth": {
+          "id": "p1-cred-jwt",
+          "name": "AI Chief Backend JWT"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "mode": "runOnceForAllItems",
+        "jsCode": "// AI Chief Phase 1: normalize backend Email rows -> EmailIngestItem subset.\n// Whitelist only the schema fields; drop body_html/non-ingest fields (privacy).\nconst items = $input.all();\nconst out = [];\nfor (const item of items) {\n  const r = item.json || item || {};\n  const arr = Array.isArray(r) ? r : (Array.isArray(r.data) ? r.data : (Array.isArray(r.results) ? r.results : [r]));\n  for (const e of arr) {\n    if (!e || !e.message_id) continue;\n    out.push({\n      json: {\n        message_id: String(e.message_id),\n        thread_id: e.thread_id ? String(e.thread_id) : null,\n        from_email: e.from_email ? String(e.from_email) : null,\n        from_name: e.from_name ? String(e.from_name) : null,\n        to_email: e.to_email ? String(e.to_email) : null,\n        subject: e.subject ? String(e.subject) : '',\n        body_text: e.body_text ? String(e.body_text).slice(0, 4000) : '',\n        received_at: e.received_at ? String(e.received_at) : null,\n        is_read: !!e.is_read\n      }\n    });\n  }\n}\nreturn out.length ? out : [{ json: { message_id: \"__none__\", from_email: null, subject: \"(no rows)\", body_text: null, is_read: false } }];"
+      },
+      "id": "p1-norm-0004",
+      "name": "3 · Normalize fields",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        0
+      ],
+      "credentials": {}
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8000/api/integrations/emails/ingest",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ emails: $input.all().map(i => i.json) }) }}",
+        "sendHeaders": true,
+        "responseFormat": "json",
+        "options": {},
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpCustomAuth"
+      },
+      "id": "p1-ingest-0005",
+      "name": "4 · POST Ingest",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        660,
+        0
+      ],
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "p1-cred-ingest",
+          "name": "AI Chief Ingest API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "mode": "runOnceForAllItems",
+        "jsCode": "// AI Chief Phase 1: report inserted/ignored/failed to verify the round trip.\n// Ingest node returns the parsed JSON body directly as $json (not fullResponse).\nconst items = $input.all();\nconst results = [];\nfor (const it of items) {\n  const b = it.json || it;\n  const arr = Array.isArray(b.results) ? b.results : (Array.isArray(b.body && b.body.results) ? b.body.results : []);\n  for (const res of arr) results.push(res);\n}\nconst inserted = results.filter(r => r && r.status === \"inserted\").length;\nconst ignored = results.filter(r => r && r.status === \"ignored\").length;\nreturn [{\n  json: {\n    received: results.length,\n    inserted,\n    ignored,\n    failed: Math.max(0, results.length - inserted - ignored),\n    details: results\n  }\n}];"
+      },
+      "id": "p1-report-0006",
+      "name": "5 · Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        0
+      ],
+      "credentials": {}
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "1 · Sync (backend Gmail, limit 3)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "1 · Sync (backend Gmail, limit 3)": {
+      "main": [
+        [
+          {
+            "node": "2 · Read newest rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "2 · Read newest rows": {
+      "main": [
+        [
+          {
+            "node": "3 · Normalize fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "3 · Normalize fields": {
+      "main": [
+        [
+          {
+            "node": "4 · POST Ingest",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "4 · POST Ingest": {
+      "main": [
+        [
+          {
+            "node": "5 · Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": {},
+  "pinData": {},
+  "meta": {
+    "instanceId": "aichief-phase1-poc"
+  }
+}

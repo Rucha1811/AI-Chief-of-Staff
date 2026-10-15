@@ -1,10 +1,15 @@
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session
 from datetime import datetime
 from typing import Optional
 
+logger = logging.getLogger(__name__)
+
 from app.core.database import get_db, SessionLocal
 from app.models.email import Email
+from app.models.user import User
 from app.schemas.email import (
     EmailResponse,
     EmailCategoryUpdate,
@@ -14,49 +19,60 @@ from app.schemas.email import (
 from app.services.ai_service import ai_service
 from app.services import gmail_service
 from app.services.email_processor import process_email as process_email_task
+from app.api.deps import get_current_user
+from app.core.limits import clamp_limit, clamp_offset
 
 router = APIRouter(prefix="/api/emails", tags=["emails"])
 
 
 async def analyze_email_in_db(email_id: int) -> None:
-    await process_email_task(email_id)
+    from app.services import ai_processor
+
+    ai_processor.enqueue_email(email_id)
 
 
 @router.post("/sync")
 async def sync_from_gmail(
-    limit: int = 50,
+    limit: int = 1000,
     auto_process: bool = True,
     background_tasks: BackgroundTasks = None,
+    user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
+    limit = clamp_limit(limit, maximum=1000)
     try:
-        added_ids = await gmail_service.sync_emails(max_results=limit, db=db)
+        added_ids, failed_ids = await gmail_service.sync_emails(
+            max_results=limit, db=db, user_id=user.id
+        )
     except gmail_service.GmailAuthError as e:
-        raise HTTPException(status_code=401, detail=f"Gmail authorization needed: {e}")
+        logger.warning("gmail auth failure for user %s: %s", user.id, e)
+        raise HTTPException(
+            status_code=503,
+            detail="Gmail authorization required. Reconnect Google in Settings.",
+        )
     except gmail_service.GmailUnavailableError as e:
-        raise HTTPException(status_code=502, detail=f"Gmail is temporarily unavailable: {e}")
+        logger.warning("gmail unavailable for user %s: %s", user.id, e)
+        raise HTTPException(
+            status_code=502, detail="Gmail is temporarily unavailable."
+        )
     if background_tasks and added_ids and auto_process:
         for email_id in added_ids:
             background_tasks.add_task(analyze_email_in_db, email_id)
-    return {"added": len(added_ids), "processing": len(added_ids) if auto_process else 0}
+    return {"added": len(added_ids), "failed": len(failed_ids), "processing": len(added_ids) if auto_process else 0}
 
 
 @router.get("/auth-status")
-async def gmail_auth_status() -> dict:
-    return await gmail_service.auth_status()
+async def gmail_auth_status(
+    user: User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> dict:
+    return await gmail_service.auth_status(db=db, user_id=user.id)
 
 
 @router.get("/health")
-async def gmail_health() -> dict:
-    return await gmail_service.health_check()
-
-
-@router.post("/re-auth")
-async def gmail_reauthorize() -> dict:
-    try:
-        return await gmail_service.reauthorize()
-    except gmail_service.GmailAuthError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+async def gmail_health(
+    user: User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> dict:
+    return await gmail_service.health_check(db=db, user_id=user.id)
 
 
 @router.get("")
@@ -66,9 +82,12 @@ async def list_emails(
     is_starred: Optional[bool] = None,
     limit: int = 50,
     offset: int = 0,
+    user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> list[EmailResponse]:
-    query = db.query(Email)
+    limit = clamp_limit(limit)
+    offset = clamp_offset(offset)
+    query = db.query(Email).filter(Email.user_id == user.id)
     if category:
         query = query.filter(Email.category == category)
     if has_deadline is not None:
@@ -80,11 +99,18 @@ async def list_emails(
 
 @router.post("/process-all")
 async def process_all_emails(
-    limit: int = 25, db: Session = Depends(get_db)
+    limit: int = 1000,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ) -> dict:
+    limit = clamp_limit(limit, maximum=1000)
     emails = (
         db.query(Email)
-        .filter(Email.category == "unknown")
+        .filter(
+            Email.user_id == user.id,
+            (Email.category == "unknown")
+            | ((Email.has_deadline.is_(True)) & Email.deadline_at.isnot(None)),
+        )
         .order_by(Email.received_at.desc())
         .limit(limit)
         .all()
@@ -107,14 +133,33 @@ async def process_all_emails(
         "processed": processed,
         "failed": failed,
         "scheduled": scheduled,
-        "remaining": db.query(Email).filter(Email.category == "unknown").count(),
+        "remaining": (
+            db.query(Email)
+            .filter(
+                Email.user_id == user.id,
+                (Email.category == "unknown")
+                | ((Email.has_deadline.is_(True)) & Email.deadline_at.isnot(None)),
+            )
+            .count()
+        ),
     }
 
 
 @router.post("/{email_id}/process")
-async def process_single_email(email_id: int) -> dict:
+async def process_single_email(
+    email_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
     from app.services.email_processor import process_email
 
+    email = (
+        db.query(Email)
+        .filter(Email.user_id == user.id, Email.id == email_id)
+        .first()
+    )
+    if not email:
+        raise HTTPException(status_code=404, detail="Email not found")
     result = await process_email(email_id)
     if result.get("error") == "not found":
         raise HTTPException(status_code=404, detail="Email not found")
@@ -122,37 +167,48 @@ async def process_single_email(email_id: int) -> dict:
 
 
 @router.get("/stats")
-async def email_stats(db: Session = Depends(get_db)) -> dict:
-    total = db.query(Email).count()
-    unread = db.query(Email).filter(Email.is_read == False).count()
-    reply_required = db.query(Email).filter(Email.category == "reply_required").count()
-    important = db.query(Email).filter(Email.category == "important").count()
-    with_deadlines = db.query(Email).filter(Email.has_deadline == True).count()
+async def email_stats(
+    user: User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> dict:
+    total = db.query(Email).filter(Email.user_id == user.id).count()
+    unread = db.query(Email).filter(Email.user_id == user.id, Email.is_read == False).count()
+    reply_required = db.query(Email).filter(Email.user_id == user.id, Email.category == "reply_required").count()
+    important = db.query(Email).filter(Email.user_id == user.id, Email.category == "important").count()
+    with_deadlines = db.query(Email).filter(Email.user_id == user.id, Email.has_deadline == True).count()
     return {
         "total": total,
         "unread": unread,
         "reply_required": reply_required,
         "important": important,
         "with_deadlines": with_deadlines,
-        "can_ignore": db.query(Email).filter(Email.category == "can_ignore").count(),
+        "can_ignore": db.query(Email).filter(Email.user_id == user.id, Email.category == "can_ignore").count(),
     }
 
 
-@router.get("/{email_id}")
-async def get_email(email_id: int, db: Session = Depends(get_db)) -> EmailResponse:
-    email = db.query(Email).filter(Email.id == email_id).first()
+def _get_owned_email(db: Session, user_id: int, email_id: int) -> Email:
+    email = db.query(Email).filter(Email.user_id == user_id, Email.id == email_id).first()
     if not email:
         raise HTTPException(status_code=404, detail="Email not found")
     return email
 
 
+@router.get("/{email_id}")
+async def get_email(
+    email_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> EmailResponse:
+    return _get_owned_email(db, user.id, email_id)
+
+
 @router.patch("/{email_id}/category")
 async def update_email_category(
-    email_id: int, update: EmailCategoryUpdate, db: Session = Depends(get_db)
+    email_id: int,
+    update: EmailCategoryUpdate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ) -> EmailResponse:
-    email = db.query(Email).filter(Email.id == email_id).first()
-    if not email:
-        raise HTTPException(status_code=404, detail="Email not found")
+    email = _get_owned_email(db, user.id, email_id)
     email.category = update.category
     db.commit()
     db.refresh(email)
@@ -160,10 +216,12 @@ async def update_email_category(
 
 
 @router.post("/{email_id}/classify")
-async def classify_email(email_id: int, db: Session = Depends(get_db)) -> EmailResponse:
-    email = db.query(Email).filter(Email.id == email_id).first()
-    if not email:
-        raise HTTPException(status_code=404, detail="Email not found")
+async def classify_email(
+    email_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> EmailResponse:
+    email = _get_owned_email(db, user.id, email_id)
     result = await ai_service.classify_email(email.subject or "", email.body_text or "")
     if "category" in result:
         email.category = result["category"]
@@ -183,11 +241,11 @@ async def classify_email(email_id: int, db: Session = Depends(get_db)) -> EmailR
 
 @router.post("/{email_id}/suggest-reply")
 async def suggest_email_reply(
-    email_id: int, db: Session = Depends(get_db)
+    email_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ) -> EmailReplyResponse:
-    email = db.query(Email).filter(Email.id == email_id).first()
-    if not email:
-        raise HTTPException(status_code=404, detail="Email not found")
+    email = _get_owned_email(db, user.id, email_id)
     reply = await ai_service.suggest_reply(
         email.body_text or "", email.subject or ""
     )
@@ -198,11 +256,11 @@ async def suggest_email_reply(
 
 @router.post("/{email_id}/summarize")
 async def summarize_email(
-    email_id: int, db: Session = Depends(get_db)
+    email_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ) -> EmailSummaryResponse:
-    email = db.query(Email).filter(Email.id == email_id).first()
-    if not email:
-        raise HTTPException(status_code=404, detail="Email not found")
+    email = _get_owned_email(db, user.id, email_id)
     result = await ai_service.summarize_email(email.subject or "", email.body_text or "")
     email.summary = result.get("summary", "")
     if result.get("has_deadline"):
@@ -219,10 +277,12 @@ async def summarize_email(
 
 
 @router.patch("/{email_id}/star")
-async def toggle_star(email_id: int, db: Session = Depends(get_db)) -> EmailResponse:
-    email = db.query(Email).filter(Email.id == email_id).first()
-    if not email:
-        raise HTTPException(status_code=404, detail="Email not found")
+async def toggle_star(
+    email_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> EmailResponse:
+    email = _get_owned_email(db, user.id, email_id)
     email.is_starred = not email.is_starred
     db.commit()
     db.refresh(email)
@@ -230,10 +290,12 @@ async def toggle_star(email_id: int, db: Session = Depends(get_db)) -> EmailResp
 
 
 @router.patch("/{email_id}/read")
-async def mark_read(email_id: int, db: Session = Depends(get_db)) -> EmailResponse:
-    email = db.query(Email).filter(Email.id == email_id).first()
-    if not email:
-        raise HTTPException(status_code=404, detail="Email not found")
+async def mark_read(
+    email_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> EmailResponse:
+    email = _get_owned_email(db, user.id, email_id)
     email.is_read = True
     db.commit()
     db.refresh(email)

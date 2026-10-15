@@ -1,12 +1,25 @@
+import asyncio
+import threading
 import httpx
 import json
 import logging
+import random
 import re
+import time
+import weakref
 from datetime import datetime
 from typing import Optional
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_str(exc: BaseException) -> str:
+    try:
+        msg = str(exc)
+    except Exception:
+        msg = type(exc).__name__
+    return msg[:300]
 
 
 def _time_greeting() -> str:
@@ -78,14 +91,135 @@ def _minutes_between(start: str, end: str) -> int:
     return max(0, _to_minutes(end) - _to_minutes(start))
 
 
+class CircuitBreaker:
+    """Simple async circuit breaker for the Ollama service.
+
+    States:
+      CLOSED   -> normal operation, requests flow
+      OPEN     -> failures exceeded threshold; requests fail fast (no calls)
+      HALF_OPEN -> a short trial window; a single success closes the circuit,
+                   a failure re-opens it.
+    """
+
+    def __init__(
+        self,
+        failure_threshold: int = None,
+        reset_seconds: float = None,
+        half_open_max: int = None,
+    ):
+        self.failure_threshold = failure_threshold or settings.OLLAMA_CIRCUIT_BREAKER_FAILURE_THRESHOLD
+        self.reset_seconds = reset_seconds or settings.OLLAMA_CIRCUIT_BREAKER_RESET_SECONDS
+        self.half_open_max = half_open_max or settings.OLLAMA_CIRCUIT_BREAKER_HALF_OPEN_MAX
+        self._failures = 0
+        self._state = "CLOSED"
+        self._opened_at: Optional[float] = None
+        self._half_open_in_flight = 0
+        # A plain threading lock is used so the breaker works regardless of
+        # which event loop (uvicorn or a per-job asyncio.run loop in a worker
+        # thread) touches it. The critical sections contain no awaits and are
+        # microseconds long, so blocking is safe here.
+        self._lock = threading.Lock()
+
+    @property
+    def state(self) -> str:
+        return self._state
+
+    async def allow_request(self) -> bool:
+        """Return True if a request may be sent; otherwise fail fast."""
+        with self._lock:
+            if self._state == "OPEN":
+                if time.monotonic() - self._opened_at >= self.reset_seconds:
+                    self._state = "HALF_OPEN"
+                    self._half_open_in_flight = 0
+                    logger.info("Ollama circuit breaker: OPEN -> HALF_OPEN (trial)")
+                else:
+                    return False
+            if self._state == "HALF_OPEN":
+                if self._half_open_in_flight >= self.half_open_max:
+                    return False
+                self._half_open_in_flight += 1
+            return True
+
+    async def on_success(self) -> None:
+        with self._lock:
+            if self._state == "HALF_OPEN":
+                self._state = "CLOSED"
+                logger.info("Ollama circuit breaker: HALF_OPEN -> CLOSED (recovered)")
+            self._failures = 0
+
+    async def on_failure(self) -> None:
+        with self._lock:
+            self._failures += 1
+            if self._state == "CLOSED" and self._failures >= self.failure_threshold:
+                self._state = "OPEN"
+                self._opened_at = time.monotonic()
+                logger.error(
+                    "Ollama circuit breaker opened after %d failures", self._failures
+                )
+            elif self._state == "HALF_OPEN":
+                self._state = "OPEN"
+                self._opened_at = time.monotonic()
+                logger.error("Ollama circuit breaker re-opened after half-open test")
+
+
 class AIService:
     def __init__(self):
         self.base_url = settings.OLLAMA_BASE_URL
         self.model = settings.OLLAMA_MODEL
+        self.request_timeout = settings.OLLAMA_REQUEST_TIMEOUT
+        self.max_retries = settings.OLLAMA_MAX_RETRIES
+        self.retry_base_delay = settings.OLLAMA_RETRY_BASE_DELAY
+        # Bounded concurrency: never allow more than N simultaneous Ollama
+        # calls. An asyncio.Semaphore is bound to the event loop that creates
+        # it, but AI jobs run both on uvicorn's loop and inside per-job
+        # asyncio.run() loops in worker threads. Keep one semaphore per loop
+        # (weakly held) so calls never cross event loops.
+        self._semaphores = weakref.WeakKeyDictionary()
+        self._sem_lock = threading.Lock()
+        self.circuit_breaker = CircuitBreaker()
+
+    def _get_semaphore(self):
+        """Return a semaphore bound to the current event loop."""
+        loop = asyncio.get_running_loop()
+        with self._sem_lock:
+            sem = self._semaphores.get(loop)
+            if sem is None:
+                sem = asyncio.Semaphore(settings.OLLAMA_MAX_CONCURRENT_REQUESTS)
+                self._semaphores[loop] = sem
+            return sem
+
+    async def health(self) -> dict:
+        """Safe, non-sensitive health probe for the Ollama backend."""
+        result = {
+            "model": self.model,
+            "available": False,
+            "model_available": False,
+            "circuit_breaker": self.circuit_breaker.state,
+            "status": "unavailable",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(f"{self.base_url}/api/tags")
+                resp.raise_for_status()
+                data = resp.json()
+                result["available"] = True
+                models = [m.get("name", "") for m in data.get("models", [])]
+                result["model_available"] = any(
+                    m == self.model or m.startswith(self.model) for m in models
+                )
+                result["status"] = (
+                    "ok" if result["model_available"] else "model_missing"
+                )
+        except Exception as e:
+            result["status"] = "unavailable"
+            logger.info("Ollama health probe failed: %s", _safe_str(e))
+        return result
 
     async def _call_ollama(
         self, prompt: str, system: Optional[str] = None, max_tokens: int = 300
     ) -> str:
+        """Call Ollama with bounded concurrency, retry with exponential backoff,
+        and a circuit breaker to avoid hammering a failing service."""
         payload = {
             "model": self.model,
             "prompt": prompt,
@@ -95,23 +229,62 @@ class AIService:
         if system:
             payload["system"] = system
 
-        # One client per call so the same transport is never shared between
-        # different event loops (uvicorn loop vs. background sync threads).
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            try:
-                resp = await client.post(
-                    f"{self.base_url}/api/generate",
-                    json=payload,
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                return data.get("response", "")
-            except httpx.RequestError as e:
-                logger.error(f"Ollama request failed: {e}")
-                raise
-            except json.JSONDecodeError as e:
-                logger.error(f"Failed to parse Ollama response: {e}")
-                raise
+        async with self._get_semaphore():
+            if not await self.circuit_breaker.allow_request():
+                logger.warning("Ollama request rejected (circuit OPEN), failing fast")
+                return ""
+
+            last_error: Optional[Exception] = None
+            for attempt in range(self.max_retries + 1):
+                try:
+                    # One client per call so the same transport is never shared
+                    # between different event loops (uvicorn vs. background).
+                    async with httpx.AsyncClient(timeout=self.request_timeout) as client:
+                        resp = await client.post(
+                            f"{self.base_url}/api/generate",
+                            json=payload,
+                        )
+                        resp.raise_for_status()
+                        data = resp.json()
+                        text = data.get("response", "")
+                        await self.circuit_breaker.on_success()
+                        if attempt > 0:
+                            logger.info("Ollama request succeeded after %d retries", attempt)
+                        return text
+                except httpx.HTTPStatusError as e:
+                    status = e.response.status_code
+                    last_error = e
+                    if status >= 500 or status == 429:
+                        # Transient server/rate-limit error -> retry
+                        await self.circuit_breaker.on_failure()
+                        await self._backoff(attempt)
+                        continue
+                    # 4xx (other than 429) = permanent request error; do NOT retry
+                    await self.circuit_breaker.on_success()
+                    logger.error("Ollama HTTP %s (permanent): %s", status, _safe_str(e))
+                    return ""
+                except (httpx.RequestError, httpx.TimeoutException, asyncio.TimeoutError) as e:
+                    last_error = e
+                    await self.circuit_breaker.on_failure()
+                    await self._backoff(attempt)
+                    continue
+                except json.JSONDecodeError as e:
+                    last_error = e
+                    await self.circuit_breaker.on_success()
+                    logger.error("Failed to parse Ollama response: %s", _safe_str(e))
+                    return ""
+
+            await self.circuit_breaker.on_failure()
+            logger.error(
+                "Ollama request failed after %d retries: %s",
+                self.max_retries,
+                _safe_str(last_error),
+            )
+            return ""
+
+    async def _backoff(self, attempt: int) -> None:
+        delay = self.retry_base_delay * (2 ** attempt) + random.uniform(0, 0.5)
+        await asyncio.sleep(min(delay, 30))
 
     async def analyze_email(self, subject: str, body: str) -> dict:
         system = """You are an email analysis assistant for a chief-of-staff AI. Analyze the email and respond ONLY in JSON with this exact shape:
@@ -161,9 +334,17 @@ Email Body:
 Extract the schedule items from this email."""
         result = await self._call_ollama(prompt, system, max_tokens=400)
         try:
-            return _parse_json(result)
+            parsed = _parse_json(result)
         except (json.JSONDecodeError, AttributeError):
             return {"items": []}
+        if isinstance(parsed, list):
+            return {"items": parsed}
+        if isinstance(parsed, dict):
+            items = parsed.get("items")
+            if isinstance(items, list):
+                return {"items": items}
+            return {"items": []}
+        return {"items": []}
 
     async def classify_email(self, subject: str, body: str) -> dict:
         system = """You are an email classification assistant. Classify the email into one of:
@@ -348,7 +529,9 @@ Respond in JSON:
             }
 
     async def close(self):
-        await self.client.aclose()
+        # Clients are created per-call (httpx.AsyncClient context managers),
+        # so there is no persistent client to close.
+        pass
 
 
 ai_service = AIService()

@@ -1,0 +1,41 @@
+# Never ship secrets, credentials, runtime state, or dev artifacts in the image.
+# The backend reads configuration from real environment variables at runtime;
+# development conveniences (.env, generated key files) live ONLY on the host
+# or in mounted volumes.
+
+# VCS
+.git/
+.gitignore
+
+# Environment files - runtime config comes from docker-compose environment,
+# never from a baked-in file
+.env
+.env.*
+
+# Auto-generated development secrets (0600 files, host-only)
+.secret_key
+.ingest_key
+
+# OAuth client material, legacy tokens, VAPID keys
+credentials/
+vapid/
+
+# Local virtualenvs and caches
+venv/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+cache/
+
+# Test suite (runs against a mounted checkout in development)
+tests/
+
+# Local databases and runtime data
+*.db
+*.sqlite
+*.sqlite3
+uploads/
+
+# OS noise
+.DS_Store

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean
+from sqlalchemy import BigInteger, Column, ForeignKey, Integer, String, Boolean
 from app.core.database import Base
 from app.models.base import TimestampMixin
 
@@ -14,3 +14,6 @@ class TimetableEntry(Base, TimestampMixin):
     end_time = Column(String(5), nullable=False)
     source = Column(String(64), default="college")
     active = Column(Boolean, default=True)
+    user_id = Column(
+        BigInteger, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )

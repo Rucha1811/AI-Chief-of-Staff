@@ -27,6 +27,7 @@ export default function CalendarPage() {
   const [showSync, setShowSync] = useState(false);
   const [busy, setBusy] = useState(false);
   const [study, setStudy] = useState({ minutes: "60", subject: "", days: "7", overwrite: false });
+  const [planOverwrite, setPlanOverwrite] = useState(false);
 
   const load = async () => {
     setLoading(true);
@@ -110,6 +111,20 @@ export default function CalendarPage() {
     }
   };
 
+  const planExams = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await api.events.planExams(3, 120, planOverwrite);
+      await load();
+      setError(res.message || `Created ${res.events_created} calendar study block${res.events_created === 1 ? "" : "s"} and ${res.tasks_created} preparation task${res.tasks_created === 1 ? "" : "s"}.`);
+    } catch (err: any) {
+      setError(err.message || "Failed to generate exam preparation plan");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       {error && (
@@ -132,12 +147,20 @@ export default function CalendarPage() {
           <button onClick={() => setShowStudy(!showStudy)} className="btn-secondary flex items-center gap-1.5">
             <BookOpen className="w-4 h-4" /> Schedule Study
           </button>
+          <button onClick={planExams} disabled={busy} className="btn-secondary flex items-center gap-1.5">
+            <Zap className="w-4 h-4" /> {busy ? "Planning…" : "Plan Exams"}
+          </button>
           <button onClick={() => setShowSync(!showSync)} className="btn-secondary flex items-center gap-1.5">
             <CloudUpload className="w-4 h-4" /> Sync to Google
           </button>
           <button onClick={() => setShowCreate(!showCreate)} className="btn-primary flex items-center gap-1.5">
             <Plus className="w-4 h-4" /> Add Event
           </button>
+        </div>
+
+        <div className="flex items-center gap-2 text-xs text-slate-500">
+          <input type="checkbox" checked={planOverwrite} onChange={(e) => setPlanOverwrite(e.target.checked)} />
+          Replace previously generated exam plan
         </div>
       </div>
 
@@ -182,7 +205,7 @@ export default function CalendarPage() {
             <CloudUpload className="w-4 h-4" /> Push events to your real Google Calendar
           </h3>
           <p className="text-xs text-slate-500">
-            Copies the events shown for {date} into your Google Calendar. Requires re-authorization with the Calendar scope.
+            Copies the events shown for {date} into your Google Calendar. Requires a connected Google account with the Calendar scope.
           </p>
           <button onClick={syncToGoogle} disabled={busy} className="btn-primary w-full">
             {busy ? "Syncing…" : `Sync ${date} to Google Calendar`}

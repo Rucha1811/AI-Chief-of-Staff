@@ -190,11 +190,11 @@ export default function DashboardPage() {
               <p className="text-xs text-red-600/80 mt-0.5">
                 {data.google_auth.reason === "not_authorized"
                   ? "No Google account is connected yet. Gmail, Classroom and Calendar won't sync until you connect one."
-                  : "Your Google authorization expired and can no longer be refreshed. Re-authorize to restore syncing."}
+                  : "Your Google authorization expired and can't be refreshed. Reconnect it in Settings to restore syncing."}
               </p>
             </div>
-            <Link href="/emails" className="btn-primary text-xs shrink-0">
-              Fix in Email Settings
+            <Link href="/settings" className="btn-primary text-xs shrink-0">
+              Connect in Settings
             </Link>
           </div>
         </div>

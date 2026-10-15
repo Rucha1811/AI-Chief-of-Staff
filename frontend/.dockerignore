@@ -1,0 +1,9 @@
+# Keep build context minimal; never ship local env files or build artifacts.
+node_modules/
+.next/
+.env
+.env.*
+npm-debug.log*
+.DS_Store
+.git/
+.gitignore

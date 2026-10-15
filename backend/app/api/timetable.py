@@ -6,12 +6,14 @@ from typing import Optional
 from app.core.database import get_db
 from app.models.event import Event
 from app.models.timetable import TimetableEntry
+from app.models.user import User
 from app.schemas.timetable import (
     TimetableEntryResponse,
     TimetableEntryCreate,
     TimetableEntryUpdate,
     TimetableScheduleResponse,
 )
+from app.api.deps import get_current_user
 
 router = APIRouter(prefix="/api/timetable", tags=["timetable"])
 
@@ -32,17 +34,39 @@ def _to_entry(entry: TimetableEntry) -> dict:
     }
 
 
+def _get_owned(db: Session, user_id: int, entry_id: int) -> TimetableEntry:
+    entry = (
+        db.query(TimetableEntry)
+        .filter(TimetableEntry.user_id == user_id, TimetableEntry.id == entry_id)
+        .first()
+    )
+    if not entry:
+        raise HTTPException(status_code=404, detail="Timetable entry not found")
+    return entry
+
+
 @router.get("")
-async def list_timetable(db: Session = Depends(get_db)) -> list[dict]:
-    entries = db.query(TimetableEntry).order_by(TimetableEntry.day_of_week, TimetableEntry.start_time).all()
+async def list_timetable(
+    user: User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> list[dict]:
+    entries = (
+        db.query(TimetableEntry)
+        .filter(TimetableEntry.user_id == user.id)
+        .order_by(TimetableEntry.day_of_week, TimetableEntry.start_time)
+        .all()
+    )
     return [_to_entry(e) for e in entries]
 
 
 @router.post("")
-async def create_timetable_entry(entry: TimetableEntryCreate, db: Session = Depends(get_db)) -> dict:
+async def create_timetable_entry(
+    entry: TimetableEntryCreate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
     if entry.day_of_week not in range(0, 7):
         raise HTTPException(status_code=422, detail="day_of_week must be 0 (Monday) to 6 (Sunday)")
-    db_entry = TimetableEntry(**entry.model_dump())
+    db_entry = TimetableEntry(**entry.model_dump(), user_id=user.id)
     db.add(db_entry)
     db.commit()
     db.refresh(db_entry)
@@ -51,11 +75,12 @@ async def create_timetable_entry(entry: TimetableEntryCreate, db: Session = Depe
 
 @router.put("/{entry_id}")
 async def update_timetable_entry(
-    entry_id: int, update: TimetableEntryUpdate, db: Session = Depends(get_db)
+    entry_id: int,
+    update: TimetableEntryUpdate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ) -> dict:
-    entry = db.query(TimetableEntry).filter(TimetableEntry.id == entry_id).first()
-    if not entry:
-        raise HTTPException(status_code=404, detail="Timetable entry not found")
+    entry = _get_owned(db, user.id, entry_id)
     for key, val in update.model_dump(exclude_unset=True).items():
         setattr(entry, key, val)
     db.commit()
@@ -64,10 +89,12 @@ async def update_timetable_entry(
 
 
 @router.delete("/{entry_id}")
-async def delete_timetable_entry(entry_id: int, db: Session = Depends(get_db)) -> dict:
-    entry = db.query(TimetableEntry).filter(TimetableEntry.id == entry_id).first()
-    if not entry:
-        raise HTTPException(status_code=404, detail="Timetable entry not found")
+async def delete_timetable_entry(
+    entry_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    entry = _get_owned(db, user.id, entry_id)
     db.delete(entry)
     db.commit()
     return {"ok": True}
@@ -86,6 +113,7 @@ async def schedule_week(
     date_from: date,
     date_to: Optional[date] = None,
     overwrite: bool = False,
+    user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> TimetableScheduleResponse:
     if not date_to:
@@ -95,13 +123,18 @@ async def schedule_week(
 
     if overwrite:
         db.query(Event).filter(
+            Event.user_id == user.id,
             Event.source == "timetable",
             Event.start_time >= datetime.combine(date_from, datetime.min.time()),
             Event.start_time <= datetime.combine(date_to, datetime.max.time()),
         ).delete(synchronize_session=False)
         db.commit()
 
-    entries = db.query(TimetableEntry).filter(TimetableEntry.active == True).all()
+    entries = (
+        db.query(TimetableEntry)
+        .filter(TimetableEntry.user_id == user.id, TimetableEntry.active == True)
+        .all()
+    )
 
     created = 0
     skipped = 0
@@ -120,6 +153,7 @@ async def schedule_week(
             exists = (
                 db.query(Event)
                 .filter(
+                    Event.user_id == user.id,
                     Event.title == entry.title,
                     Event.start_time == start_dt,
                     Event.source == "timetable",
@@ -136,6 +170,7 @@ async def schedule_week(
                     start_time=start_dt,
                     end_time=end_dt,
                     source="timetable",
+                    user_id=user.id,
                 )
             )
             created += 1

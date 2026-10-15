@@ -1,0 +1,35 @@
+name: n8n
+
+services:
+  n8n:
+    image: n8nio/n8n:latest
+    ports:
+      - "127.0.0.1:5678:5678"
+    volumes:
+      - n8n_data:/home/node/.n8n
+    env_file:
+      - .n8n.env
+    environment:
+      N8N_HOST: localhost
+      N8N_PORT: 5678
+      N8N_PROTOCOL: http
+      # n8n 2.x blocks $env access in expressions/code UNLESS this is set to the
+      # literal string "false". Required for {{ $env.AI_CHIEF_BACKEND_URL }}.
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"
+      # Service URLs inside the shared Docker network. These let n8n reach the
+      # backend by service name rather than host.docker.internal (portable to
+      # Linux/production where host.docker.internal does not exist by default).
+      AI_CHIEF_BACKEND_URL: ${AI_CHIEF_BACKEND_URL:-http://backend:8000}
+    restart: unless-stopped
+    networks:
+      - aichief
+
+# Join the shared application network so n8n can reach the backend + Postgres
+# by Docker service name. The network is created by docker-compose.yml.
+networks:
+  aichief:
+    name: aichief_net
+    external: true
+
+volumes:
+  n8n_data:

@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useRef } from "react";
 import { api, Document } from "@/lib/api";
-import { FileText, Upload, Sparkles, Trash2, Search, Send, File, Loader2 } from "lucide-react";
+import { FileText, Upload, Sparkles, Trash2, Search, Send, File, Loader2, Cloud } from "lucide-react";
 import BackButton from "@/components/BackButton";
 
 export default function DocumentsPage() {
@@ -15,6 +15,7 @@ export default function DocumentsPage() {
   const [answering, setAnswering] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [error, setError] = useState<string | null>(null);
+  const [driveSyncing, setDriveSyncing] = useState(false);
 
   const load = async () => {
     setLoading(true);
@@ -47,6 +48,18 @@ export default function DocumentsPage() {
     await api.documents.delete(id);
     if (selectedDoc?.id === id) setSelectedDoc(null);
     await load();
+  };
+
+  const syncDrive = async () => {
+    setDriveSyncing(true);
+    try {
+      await api.documents.syncGoogle();
+      await load();
+    } catch (err: any) {
+      setError(err.message || "Google Drive sync failed");
+    } finally {
+      setDriveSyncing(false);
+    }
   };
 
   const summarize = async (id: number) => {
@@ -83,7 +96,10 @@ export default function DocumentsPage() {
         </div>
       )}
       <div className="flex items-center justify-between">
-        <div>
+        <div className="flex gap-2">
+          <button onClick={syncDrive} disabled={driveSyncing} className="btn-secondary flex items-center gap-1.5">
+            <Cloud className="w-4 h-4" /> {driveSyncing ? "Syncing…" : "Sync Drive"}
+          </button>
           <BackButton />
           <h1 className="text-2xl font-bold text-gradient mt-3">Document Intelligence</h1>
           <p className="text-slate-500 mt-1">{docs.length} documents uploaded</p>

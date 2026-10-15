@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, type AttendanceRecord, type AttendanceStats } from "@/lib/api";
 import BackButton from "@/components/BackButton";
+import EGovAttendanceCard from "@/components/EGovAttendanceCard";
 import { UserCheck, Plus, Trash2 } from "lucide-react";
 
 const STATUS_LABEL: Record<string, string> = { present: "Present", absent: "Absent", late: "Late", excused: "Excused" };
@@ -88,6 +89,9 @@ export default function AttendancePage() {
           <Plus className="w-4 h-4" /> Add record
         </button>
       </div>
+
+      {/* CHARUSAT e-Governance (read-only, independent of the manual records) */}
+      <EGovAttendanceCard />
 
       {stats && (
         <div className="grid grid-cols-2 md:grid-cols-5 gap-4">

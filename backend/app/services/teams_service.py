@@ -1,6 +1,4 @@
-import json
 import logging
-import os
 import time
 from datetime import datetime, timezone
 from typing import Optional
@@ -10,17 +8,16 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.database import SessionLocal
+from app.core.security import encrypt_bytes, decrypt_bytes
 from app.models.event import Event
+from app.models.user_integration import UserIntegration
 
 logger = logging.getLogger(__name__)
 
+PROVIDER = "ms_teams"
+
 GRAPH_BASE = "https://graph.microsoft.com/v1.0"
-MS_CREDENTIALS_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "credentials")
-MS_TOKEN_FILE = os.path.join(MS_CREDENTIALS_DIR, "ms_token.json")
-
 MS_SCOPES = "https://graph.microsoft.com/Calendars.Read offline_access"
-
-_pending_flows: dict = {}
 
 
 class TeamsAuthError(RuntimeError):
@@ -39,23 +36,118 @@ def _tenant() -> str:
     return settings.MS_TENANT_ID or "consumers"
 
 
-def _load_token() -> Optional[dict]:
-    if not os.path.exists(MS_TOKEN_FILE):
+def _naive_utc(dt):
+    if dt is None:
+        return None
+    if getattr(dt, "tzinfo", None) is not None:
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
+def integration_row(db: Session, user_id: int) -> Optional[UserIntegration]:
+    """The current user's Microsoft 365 integration row (provider ms_teams)."""
+    if user_id is None:
+        return None
+    return (
+        db.query(UserIntegration)
+        .filter(UserIntegration.user_id == user_id, UserIntegration.provider == PROVIDER)
+        .first()
+    )
+
+
+def _token_from_row(row: Optional[UserIntegration]) -> Optional[dict]:
+    if row is None or not row.access_token_encrypted:
         return None
     try:
-        with open(MS_TOKEN_FILE, "r") as f:
-            return json.load(f)
-    except (OSError, json.JSONDecodeError):
+        access_token = (
+            decrypt_bytes(row.access_token_encrypted.encode(), settings.SECRET_KEY).decode()
+            if row.access_token_encrypted
+            else None
+        )
+        refresh_token = (
+            decrypt_bytes(row.refresh_token_encrypted.encode(), settings.SECRET_KEY).decode()
+            if row.refresh_token_encrypted
+            else None
+        )
+    except Exception:
         return None
+    meta = dict(row.meta or {})
+    expiry = meta.get("token_expires_at")
+    if expiry is None and row.token_expires_at is not None:
+        expiry = (row.token_expires_at - datetime(1970, 1, 1)).total_seconds()
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "expires_at": expiry or 0,
+        "account": row.account_id,
+        "scope": row.scopes or MS_SCOPES,
+    }
 
 
-def _save_token(token: dict) -> None:
-    os.makedirs(MS_CREDENTIALS_DIR, exist_ok=True)
-    with open(MS_TOKEN_FILE, "w") as f:
-        json.dump(token, f, indent=2)
+def _save_token_for_user(
+    db: Session, user_id: int, token: dict, account: Optional[str] = None
+) -> None:
+    row = integration_row(db, user_id)
+    if row is None:
+        row = UserIntegration(user_id=user_id, provider=PROVIDER, status="active")
+        db.add(row)
+    if token.get("access_token"):
+        row.access_token_encrypted = encrypt_bytes(
+            token["access_token"].encode(), settings.SECRET_KEY
+        ).decode()
+    if token.get("refresh_token"):
+        row.refresh_token_encrypted = encrypt_bytes(
+            token["refresh_token"].encode(), settings.SECRET_KEY
+        ).decode()
+    expires_at = token.get("expires_at")
+    if expires_at:
+        row.token_expires_at = _naive_utc(
+            datetime.fromtimestamp(expires_at, timezone.utc)
+        )
+    if token.get("scope"):
+        row.scopes = token["scope"]
+    if account:
+        row.account_id = account
+    row.status = "active"
+    row.last_error = None
+    meta = dict(row.meta or {})
+    if expires_at:
+        meta["token_expires_at"] = expires_at
+    row.meta = meta
+    db.commit()
 
 
-async def start_device_flow() -> dict:
+def _device_flow(db: Session, user_id: int):
+    row = integration_row(db, user_id)
+    if row is None:
+        return None
+    return (row.meta or {}).get("device_flow")
+
+
+def _store_device_flow(db: Session, user_id: int, flow: dict) -> None:
+    row = integration_row(db, user_id)
+    if row is None:
+        row = UserIntegration(user_id=user_id, provider=PROVIDER, status="pending")
+        db.add(row)
+    meta = dict(row.meta or {})
+    meta["device_flow"] = flow
+    row.meta = meta
+    db.commit()
+
+
+def _clear_device_flow(db: Session, user_id: int) -> None:
+    row = integration_row(db, user_id)
+    if row is None:
+        return
+    meta = dict(row.meta or {})
+    meta.pop("device_flow", None)
+    row.meta = meta
+    db.commit()
+
+
+async def start_device_flow(db: Session, user_id: int) -> dict:
+    if user_id is None:
+        raise TeamsAuthError("Authenticated user required.")
     if not is_configured():
         raise TeamsAuthError("Microsoft not configured. Set MS_CLIENT_ID in .env")
     async with httpx.AsyncClient(timeout=20.0) as client:
@@ -68,11 +160,15 @@ async def start_device_flow() -> dict:
         )
         resp.raise_for_status()
         data = resp.json()
-    _pending_flows[settings.MS_CLIENT_ID] = {
-        "device_code": data.get("device_code"),
-        "expires_at": time.time() + data.get("expires_in", 900),
-        "interval": data.get("interval", 5),
-    }
+    _store_device_flow(
+        db,
+        user_id,
+        {
+            "device_code": data.get("device_code"),
+            "expires_at": time.time() + data.get("expires_in", 900),
+            "interval": data.get("interval", 5),
+        },
+    )
     return {
         "user_code": data.get("user_code"),
         "verification_uri": data.get("verification_uri"),
@@ -81,14 +177,16 @@ async def start_device_flow() -> dict:
     }
 
 
-async def poll_device_flow() -> dict:
+async def poll_device_flow(db: Session, user_id: int) -> dict:
+    if user_id is None:
+        raise TeamsAuthError("Authenticated user required.")
     if not is_configured():
         raise TeamsAuthError("Microsoft not configured. Set MS_CLIENT_ID in .env")
-    flow = _pending_flows.get(settings.MS_CLIENT_ID)
+    flow = _device_flow(db, user_id)
     if not flow:
         return {"status": "no_pending_flow"}
-    if time.time() > flow["expires_at"]:
-        _pending_flows.pop(settings.MS_CLIENT_ID, None)
+    if time.time() > (flow.get("expires_at") or 0):
+        _clear_device_flow(db, user_id)
         return {"status": "expired"}
 
     async with httpx.AsyncClient(timeout=20.0) as client:
@@ -103,16 +201,16 @@ async def poll_device_flow() -> dict:
         data = resp.json()
 
     if "access_token" in data:
-        _pending_flows.pop(settings.MS_CLIENT_ID, None)
+        _clear_device_flow(db, user_id)
         token = {
             "access_token": data["access_token"],
             "refresh_token": data.get("refresh_token"),
             "expires_at": time.time() + data.get("expires_in", 3600),
             "scope": data.get("scope", ""),
-            "account": (await _me(data["access_token"])).get("userPrincipalName"),
         }
-        _save_token(token)
-        return {"status": "success", "account": token["account"]}
+        account = (await _me(data["access_token"])).get("userPrincipalName")
+        _save_token_for_user(db, user_id, token, account=account)
+        return {"status": "success", "account": account}
     if data.get("error") == "authorization_pending":
         return {"status": "pending"}
     return {"status": "error", "detail": data.get("error_description", data.get("error"))}
@@ -127,13 +225,13 @@ async def _me(access_token: str) -> dict:
         return resp.json() if resp.status_code == 200 else {}
 
 
-async def _access_token() -> str:
-    token = _load_token()
-    if not token:
+async def _access_token_for_user(db: Session, user_id: int) -> str:
+    token = _token_from_row(integration_row(db, user_id))
+    if not token or not token.get("access_token"):
         raise TeamsAuthError(
             "Microsoft account not connected yet. Call /api/teams/connect to sign in."
         )
-    if token.get("expires_at", 0) > time.time() + 60:
+    if token["expires_at"] > time.time() + 60:
         return token["access_token"]
 
     refresh_token = token.get("refresh_token")
@@ -156,30 +254,33 @@ async def _access_token() -> str:
     if data.get("refresh_token"):
         token["refresh_token"] = data["refresh_token"]
     token["expires_at"] = time.time() + data.get("expires_in", 3600)
-    _save_token(token)
+    token["scope"] = data.get("scope") or token.get("scope") or MS_SCOPES
+    _save_token_for_user(db, user_id, token)
     return token["access_token"]
 
 
-async def status() -> dict:
+async def status(db: Session, user_id: int) -> dict:
+    if user_id is None:
+        return {"configured": is_configured(), "connected": False, "reason": "unauthorized"}
     if not is_configured():
         return {"configured": False, "connected": False, "reason": "not_configured"}
-    token = _load_token()
-    if not token:
+    row = integration_row(db, user_id)
+    if row is None or not row.access_token_encrypted:
         return {"configured": True, "connected": False, "reason": "not_connected"}
     try:
-        await _access_token()
+        await _access_token_for_user(db, user_id)
         return {
             "configured": True,
             "connected": True,
-            "account": token.get("account"),
+            "account": row.account_id,
             "reason": "ok",
         }
     except TeamsAuthError as e:
         return {"configured": True, "connected": False, "reason": str(e)}
 
 
-async def fetch_events(limit: int = 100) -> list[dict]:
-    token = await _access_token()
+async def fetch_events(db: Session, user_id: int, limit: int = 100) -> list[dict]:
+    token = await _access_token_for_user(db, user_id)
     async with httpx.AsyncClient(timeout=20.0) as client:
         resp = await client.get(
             f"{GRAPH_BASE}/me/events",
@@ -209,7 +310,9 @@ def _to_event_item(item: dict) -> dict:
     end_dt = end_dt.astimezone(timezone.utc).replace(tzinfo=None)
     location = (item.get("location") or {}).get("displayName")
     return {
-        "id": f"ms:{item.get('id')}",
+        # calendar_event_id is intentionally NOT prefilled with the MS id
+        # so that push_events_to_calendar can push it to Google Calendar.
+        # The MS id is stored in source_id instead.
         "title": item.get("subject") or "(No subject)",
         "description": item.get("bodyPreview"),
         "location": location,
@@ -219,25 +322,30 @@ def _to_event_item(item: dict) -> dict:
     }
 
 
-async def sync_events(db: Session = None) -> dict:
+async def sync_events(db: Session = None, user_id: int = None) -> dict:
+    if user_id is None:
+        raise TeamsAuthError("Authenticated user required.")
     owns_db = db is None
     if owns_db:
         db = SessionLocal()
-    events = await fetch_events(100)
+    events = await fetch_events(db, user_id, 100)
     created = 0
     skipped = 0
     try:
-        existing_ids = {
-            e.calendar_event_id for e in db.query(Event).filter(Event.source == "teams").all()
+        existing_titles = {
+            e.title
+            for e in db.query(Event)
+            .filter(Event.source == "teams", Event.user_id == user_id)
+            .all()
         }
         for item in events:
             parsed = _to_event_item(item)
             if not parsed:
                 continue
-            if parsed["id"] in existing_ids:
+            if parsed["title"] in existing_titles:
                 skipped += 1
                 continue
-            db.add(Event(source="teams", **parsed))
+            db.add(Event(source="teams", user_id=user_id, **parsed))
             created += 1
         db.commit()
     finally:

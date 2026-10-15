@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime
+from sqlalchemy import BigInteger, Column, ForeignKey, Integer, String, Text, DateTime
 from app.core.database import Base
 from app.models.base import TimestampMixin
 
@@ -11,3 +11,6 @@ class Attendance(Base, TimestampMixin):
     date = Column(DateTime, nullable=False)
     status = Column(String(16), default="present")
     notes = Column(Text, nullable=True)
+    user_id = Column(
+        BigInteger, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
