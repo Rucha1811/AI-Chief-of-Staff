@@ -182,10 +182,10 @@ _MIGRATIONS = {
     ],
     "events": [
         ("recurrence_rule", "VARCHAR(32)"),
-        ("recurrence_until", "DATETIME"),
+        ("recurrence_until", "TIMESTAMP"),
     ],
     "emails": [
-        ("retention_until", "DATETIME"),
+        ("retention_until", "TIMESTAMP"),
         ("sensitivity", "VARCHAR(16)"),
     ],
     "emergency_codes": [
@@ -199,7 +199,7 @@ _MIGRATIONS = {
     # used by the authenticated dashboard and OAuth health state.
     **{
         table: [("user_id", "BIGINT")]
-        + ([("push_sent_at", "DATETIME")] if table == "notifications" else [])
+        + ([("push_sent_at", "TIMESTAMP")] if table == "notifications" else [])
         for table in (
             "emails",
             "events",

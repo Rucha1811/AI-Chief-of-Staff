@@ -69,7 +69,7 @@
       "parameters": {
         "language": "javaScript",
         "mode": "runOnceForAllItems",
-        "jsCode": "\n// Each incoming item is a JSON array of trusted accounts from the backend's\n// GET /api/integrations/agent/accounts. Emit one item per account so the\n// sync node runs once per user with that user's account_id only.\nconst payload = $input.all()[0].json;\nif (!Array.isArray(payload)) return [{ json: [] }];\nreturn payload.map((a) => ({\n  json: { account_id: a.account_id, user_id: a.user_id, email: a.email },\n}));\n"
+        "jsCode": "// Normalize either an array response or one item per account. Emit one item per trusted account so the sync node runs once per user.\nconst payload = $input.all().flatMap((item) =>\n  Array.isArray(item.json) ? item.json : [item.json],\n);\nreturn payload\n  .filter((account) => account && account.account_id)\n  .map((account) => ({\n    json: {\n      account_id: account.account_id,\n      user_id: account.user_id,\n      email: account.email,\n    },\n  }));\n"
       }
     },
     {
@@ -177,5 +177,6 @@
   },
   "staticData": {},
   "pinData": {},
-  "meta": {}
+  "meta": {},
+  "active": true
 }
